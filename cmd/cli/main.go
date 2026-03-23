@@ -93,8 +93,15 @@ func flattenState(gs *noita.GameState, reader *noita.Reader) map[string]string {
 	if inv := gs.PlayerInv; inv != nil {
 		flattenStruct(m, "Inv", inv, reader)
 	}
-	for i, w := range gs.Wands {
-		flattenStruct(m, fmt.Sprintf("Wand%d", i), w, reader)
+	for i, item := range gs.Wands {
+		m[fmt.Sprintf("Wand%d.Name", i)] = fmt.Sprintf("%q", item.Name(reader.Ctx))
+		flattenStruct(m, fmt.Sprintf("Wand%d", i), item.Ability, reader)
+	}
+	for i, item := range gs.Items {
+		m[fmt.Sprintf("Item%d.Name", i)] = fmt.Sprintf("%q", item.Name(reader.Ctx))
+		for _, mat := range item.Contents {
+			m[fmt.Sprintf("Item%d.%s", i, mat.Name)] = fmt.Sprintf("%.0f", mat.Amount)
+		}
 	}
 
 	return m

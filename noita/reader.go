@@ -1,12 +1,14 @@
 package noita
 
+//go:generate go run github.com/vitaminmoo/memtools/cmd/hexpatgen@latest -i noita.hexpat -o noita_gen.go -pkg noita
+
 import (
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
 
-	"github.com/vitaminmoo/memtools/hexpatgen/runtime"
+	"github.com/vitaminmoo/memtools/hexpat/runtime"
 )
 
 // Known static addresses in noita.exe (stable across runs).
@@ -23,12 +25,20 @@ const (
 
 // Component type IDs (runtime-assigned, validated from dumps).
 const (
-	TypeAbilityComponent       = 3
-	TypeCharacterDataComponent = 22
-	TypeDamageModelComponent   = 31
-	TypeInventory2Component    = 73
-	TypeWalletComponent        = 159
-	TypeWorldStateComponent    = 161
+	TypeAbilityComponent           = 3
+	TypeCharacterDataComponent     = 22
+	TypeDamageModelComponent       = 31
+	TypeInventory2Component        = 73
+	TypeMaterialInventoryComponent = 101
+	TypeWalletComponent            = 159
+	TypeWorldStateComponent        = 161
+)
+
+// CellFactory material array: inline CellData structs at stride 0x290, base at CellFactory+0x18.
+// CellData+0x00 = name (24-byte MsvcString).
+const (
+	cellDataStride         = 0x290
+	cellFactoryArrayOffset = 0x18
 )
 
 // GameState holds a snapshot of all interesting game data.
@@ -40,7 +50,7 @@ type GameState struct {
 	DeathCount   int32
 	NumOrbsTotal int32
 
-	Globals   *GameGlobals
+	Globals    *GameGlobals
 	WorldState *WorldStateComponent
 
 	PlayerEntity *Entity
@@ -48,7 +58,8 @@ type GameState struct {
 	PlayerWallet *WalletComponent
 	PlayerChar   *CharacterDataComponent
 	PlayerInv    *Inventory2Component
-	Wands        []*AbilityComponent
+	Wands        []*InventoryItem
+	Items        []*InventoryItem
 
 	// Camera from WorldManager (GameGlobals.pWorldManager -> viewX/Y/W/H)
 	CameraX float32
@@ -58,6 +69,34 @@ type GameState struct {
 }
 
 // MsvcStringValue extracts the Go string from an MsvcString.
+// MaterialContent represents a material and its amount in a container.
+type MaterialContent struct {
+	MaterialID int
+	Name       string
+	Amount     float64
+}
+
+// InventoryItem wraps an AbilityComponent with its parent entity info.
+type InventoryItem struct {
+	Entity   *Entity
+	Ability  *AbilityComponent
+	Contents []MaterialContent // populated for potions/flasks
+}
+
+// IsWand returns true if this item is a wand (has gun script), false for potions/consumables.
+func (item *InventoryItem) IsWand() bool {
+	return item.Ability.UseGunScript
+}
+
+// Name returns a display name.
+func (item *InventoryItem) Name(ctx *runtime.ReadContext) string {
+	name := MsvcStringValue(&item.Ability.UiName, ctx)
+	if name == "" {
+		name = MsvcStringValue(&item.Ability.SpriteFile, ctx)
+	}
+	return name
+}
+
 func MsvcStringValue(s *MsvcString, ctx *runtime.ReadContext) string {
 	if s.Length == 0 {
 		return ""
@@ -194,11 +233,110 @@ func (r *Reader) ReadState() *GameState {
 	gs.PlayerChar = readComponent[CharacterDataComponent](r, em, gs.PlayerEntity.SlotIndex, TypeCharacterDataComponent, ReadCharacterDataComponent)
 	gs.PlayerInv = readComponent[Inventory2Component](r, em, gs.PlayerEntity.SlotIndex, TypeInventory2Component, ReadInventory2Component)
 
-	// Read wands: traverse player → children → inventory containers → children → AbilityComponent
-	// Wands are NOT on the player entity; they're child entities in the inventory hierarchy.
-	gs.Wands = r.findWands(em, gs.PlayerEntity)
+	// Read inventory: traverse player → children → inventory containers → children → AbilityComponent
+	// Wands/items are NOT on the player entity; they're child entities in the inventory hierarchy.
+	allItems := r.findInventoryItems(em, gs.PlayerEntity)
+	for _, item := range allItems {
+		if item.IsWand() {
+			gs.Wands = append(gs.Wands, item)
+		} else {
+			gs.Items = append(gs.Items, item)
+		}
+	}
 
 	return gs
+}
+
+// readMaterialName reads the material name for a given material ID from CellFactory.
+func (r *Reader) readMaterialName(matID int) string {
+	globalsPtr, err := r.readU32(AddrGameGlobals)
+	if err != nil || globalsPtr == 0 {
+		return fmt.Sprintf("mat_%d", matID)
+	}
+	cfPtr, err := r.readU32(int64(globalsPtr) + 0x18)
+	if err != nil || cfPtr == 0 {
+		return fmt.Sprintf("mat_%d", matID)
+	}
+	// Read base pointer to CellData array at CellFactory+0x18
+	arrayBase, err := r.readU32(int64(cfPtr) + cellFactoryArrayOffset)
+	if err != nil || arrayBase == 0 {
+		return fmt.Sprintf("mat_%d", matID)
+	}
+	// CellData[matID] at arrayBase + matID * 0x290, name is MsvcString at +0x00
+	addr := int64(arrayBase) + int64(matID)*cellDataStride
+	ms, errs := ReadMsvcString(r.Ctx, uintptr(addr))
+	if errs.HasFatal() || ms == nil {
+		return fmt.Sprintf("mat_%d", matID)
+	}
+	name := MsvcStringValue(ms, r.Ctx)
+	if name == "" {
+		return fmt.Sprintf("mat_%d", matID)
+	}
+	return name
+}
+
+// readPotionContents reads MaterialInventoryComponent for an entity and returns non-zero materials.
+func (r *Reader) readPotionContents(em *EntityManager, slotIndex int32) []MaterialContent {
+	compPtr := r.findComponentPtr(em, slotIndex, TypeMaterialInventoryComponent)
+	if compPtr == 0 {
+		return nil
+	}
+	// Material count vector at MaterialInventoryComponent+0x80 (std::vector<double>)
+	vecBegin, _ := r.readU32(int64(compPtr) + 0x80)
+	vecEnd, _ := r.readU32(int64(compPtr) + 0x84)
+	if vecBegin == 0 || vecEnd <= vecBegin {
+		return nil
+	}
+	byteLen := vecEnd - vecBegin
+	numMaterials := byteLen / 8
+	if numMaterials > 1000 {
+		return nil
+	}
+	vecData := make([]byte, byteLen)
+	if _, err := r.Ctx.ReadAt(vecData, int64(vecBegin)); err != nil {
+		return nil
+	}
+	var contents []MaterialContent
+	for i := uint32(0); i < numMaterials; i++ {
+		amount := math.Float64frombits(binary.LittleEndian.Uint64(vecData[i*8 : i*8+8]))
+		if amount > 0 {
+			contents = append(contents, MaterialContent{
+				MaterialID: int(i),
+				Name:       r.readMaterialName(int(i)),
+				Amount:     amount,
+			})
+		}
+	}
+	return contents
+}
+
+// findComponentPtr looks up a component pointer for an entity slot + type ID.
+func (r *Reader) findComponentPtr(em *EntityManager, slotIndex int32, typeID int) uint32 {
+	if slotIndex < 0 || em == nil {
+		return 0
+	}
+	numBuffers := (em.ComponentBuffers.EndPtr - em.ComponentBuffers.BeginPtr) / 4
+	if uint32(typeID) >= numBuffers {
+		return 0
+	}
+	bufferPtr, err := r.readU32(int64(em.ComponentBuffers.BeginPtr) + int64(typeID)*4)
+	if err != nil || bufferPtr == 0 {
+		return 0
+	}
+	cb, _ := ReadComponentBuffer(r.Ctx, uintptr(bufferPtr))
+	if cb == nil {
+		return 0
+	}
+	numSparse := (cb.SparseIndex.EndPtr - cb.SparseIndex.BeginPtr) / 4
+	if uint32(slotIndex) >= numSparse {
+		return 0
+	}
+	denseIdx, err := r.readS32(int64(cb.SparseIndex.BeginPtr) + int64(slotIndex)*4)
+	if err != nil || denseIdx < 0 {
+		return 0
+	}
+	compPtr, _ := r.readU32(int64(cb.Components.BeginPtr) + int64(denseIdx)*4)
+	return compPtr
 }
 
 // readChildEntityPtrs reads the Entity* pointers from a ChildrenContainer.
@@ -225,13 +363,13 @@ func (r *Reader) readChildEntityPtrs(childrenPtr uint32) []uint32 {
 	return ptrs
 }
 
-// findWands traverses player children (and grandchildren) looking for entities with AbilityComponent.
-func (r *Reader) findWands(em *EntityManager, player *Entity) []*AbilityComponent {
+// findInventoryItems traverses player children (and grandchildren) looking for entities with AbilityComponent.
+func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*InventoryItem {
 	if em == nil || player == nil {
 		return nil
 	}
 
-	var wands []*AbilityComponent
+	var items []*InventoryItem
 
 	// Player → children (includes inventory container entities)
 	childPtrs := r.readChildEntityPtrs(player.ChildrenPtr)
@@ -244,12 +382,16 @@ func (r *Reader) findWands(em *EntityManager, player *Entity) []*AbilityComponen
 			continue
 		}
 
-		// Check if this child has AbilityComponent (unlikely but possible)
-		if wand := readComponent[AbilityComponent](r, em, child.SlotIndex, TypeAbilityComponent, ReadAbilityComponent); wand != nil {
-			wands = append(wands, wand)
+		// Check if this child has AbilityComponent
+		if ac := readComponent[AbilityComponent](r, em, child.SlotIndex, TypeAbilityComponent, ReadAbilityComponent); ac != nil {
+			item := &InventoryItem{Entity: child, Ability: ac}
+			if !item.IsWand() {
+				item.Contents = r.readPotionContents(em, child.SlotIndex)
+			}
+			items = append(items, item)
 		}
 
-		// Check grandchildren (inventory container → wand entities)
+		// Check grandchildren (inventory container → item entities)
 		grandchildPtrs := r.readChildEntityPtrs(child.ChildrenPtr)
 		for _, gcp := range grandchildPtrs {
 			if gcp == 0 {
@@ -259,13 +401,17 @@ func (r *Reader) findWands(em *EntityManager, player *Entity) []*AbilityComponen
 			if grandchild == nil || grandchild.PendingKill >= 1 {
 				continue
 			}
-			if wand := readComponent[AbilityComponent](r, em, grandchild.SlotIndex, TypeAbilityComponent, ReadAbilityComponent); wand != nil {
-				wands = append(wands, wand)
+			if ac := readComponent[AbilityComponent](r, em, grandchild.SlotIndex, TypeAbilityComponent, ReadAbilityComponent); ac != nil {
+				item := &InventoryItem{Entity: grandchild, Ability: ac}
+				if !item.IsWand() {
+					item.Contents = r.readPotionContents(em, grandchild.SlotIndex)
+				}
+				items = append(items, item)
 			}
 		}
 	}
 
-	return wands
+	return items
 }
 
 type readFunc[T any] func(ctx *runtime.ReadContext, addr uintptr) (*T, runtime.Errors)

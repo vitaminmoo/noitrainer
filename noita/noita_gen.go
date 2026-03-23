@@ -2,8 +2,9 @@ package noita
 
 import (
 	"encoding/binary"
-	"github.com/vitaminmoo/memtools/hexpatgen/runtime"
 	"math"
+
+	"github.com/vitaminmoo/memtools/hexpat/runtime"
 )
 
 type MsvcString struct {
@@ -33,59 +34,10 @@ type Entity struct {
 	ParentEntityPtr uint32
 }
 
-type ComponentHeader struct {
-	Vtable        uint32
-	BufferIndex   int32
-	PTypeName     uint32
-	TypeId        int32
-	Unknown10     uint32
-	Active        bool
-	ComponentTags [32]uint8
-	Unknown38     uint32
-	Unknown3c     uint32
-	Unknown40     uint32
-	Unknown44     uint32
-}
-
-type WalletComponent struct {
-	Header         ComponentHeader
-	Money          int64
-	MoneySpent     int64
-	MoneyPrevFrame int64
-	HasReachedInf  bool
-}
-
-type CharacterDataComponent struct {
-	Header     ComponentHeader
-	Gravity    float32
-	FlyTime    float32
-	IsOnGround bool
-	VelocityX  float32
-	VelocityY  float32
-}
-
-type ConfigGun struct {
-	Vtable               uint32
-	ActionsPerRound      int32
-	ShuffleDeckWhenEmpty bool
-	ReloadTime           int32
-	DeckCapacity         int32
-}
-
 type StdVectorHeader struct {
 	BeginPtr    uint32
 	EndPtr      uint32
 	CapacityPtr uint32
-}
-
-type EntityManager struct {
-	Vtable           uint32
-	NextEntityId     int32
-	FreeSlotStack    StdVectorHeader
-	EntityArray      StdVectorHeader
-	TagGroups        StdVectorHeader
-	ComponentBuffers StdVectorHeader
-	PEventManager    uint32
 }
 
 type ComponentBuffer struct {
@@ -107,6 +59,20 @@ type ComponentBuffer struct {
 	PEntityManager   uint32
 	PEventManager    uint32
 	NameString       MsvcString
+}
+
+type ComponentHeader struct {
+	Vtable        uint32
+	BufferIndex   int32
+	PTypeName     uint32
+	TypeId        int32
+	Unknown10     uint32
+	Active        bool
+	ComponentTags [32]uint8
+	Unknown38     uint32
+	Unknown3c     uint32
+	Unknown40     uint32
+	Unknown44     uint32
 }
 
 type DamageModelComponent struct {
@@ -135,51 +101,12 @@ type DamageModelComponent struct {
 	InvincibilityFrames int32
 }
 
-type Inventory2Component struct {
-	Header               ComponentHeader
-	QuickInventorySlots  int32
-	FullInventorySlotsX  int32
-	FullInventorySlotsY  int32
-	SavedActiveItemIndex int32
-	ActiveItem           int32
-	ActualActiveItem     int32
-	ActiveStash          int32
-	ThrowItem            int32
-	ItemHolstered        bool
-	Initialized          bool
-	ForceRefresh         bool
-	DontLogNextItemEquip bool
-	SmoothedItemXOffset  float32
-	LastItemSwitchFrame  int32
-	IntroEquipItemLerp   float32
-	SmoothedItemAngleX   float32
-	SmoothedItemAngleY   float32
-}
-
-type WorldManagerViewRect struct {
-	ViewX      float32
-	ViewY      float32
-	ViewWidth  float32
-	ViewHeight float32
-}
-
-type DeathMatchApp struct {
-	PlayerEntities StdVectorHeader
-}
-
-type WorldStateComponent struct {
-	Header           ComponentHeader
-	BiomeCryptCount  int32
-	GodsAfraid       int32
-	GodsImpressed    int32
-	GodsAfraidDamage int32
-	GodsEnraged      int32
-}
-
-type ChildrenContainer struct {
-	BeginPtr    uint32
-	EndPtr      uint32
-	CapacityPtr uint32
+type ConfigGun struct {
+	Vtable               uint32
+	ActionsPerRound      int32
+	ShuffleDeckWhenEmpty bool
+	ReloadTime           int32
+	DeckCapacity         int32
 }
 
 type AbilityComponent struct {
@@ -234,6 +161,55 @@ type AbilityComponent struct {
 	IsInitialized                      bool
 }
 
+type ChildrenContainer struct {
+	BeginPtr    uint32
+	EndPtr      uint32
+	CapacityPtr uint32
+}
+
+type EntityManager struct {
+	Vtable           uint32
+	NextEntityId     int32
+	FreeSlotStack    StdVectorHeader
+	EntityArray      StdVectorHeader
+	TagGroups        StdVectorHeader
+	ComponentBuffers StdVectorHeader
+	PEventManager    uint32
+}
+
+type CharacterDataComponent struct {
+	Header     ComponentHeader
+	Gravity    float32
+	FlyTime    float32
+	IsOnGround bool
+	VelocityX  float32
+	VelocityY  float32
+}
+
+type WorldManagerViewRect struct {
+	ViewX      float32
+	ViewY      float32
+	ViewWidth  float32
+	ViewHeight float32
+}
+
+type WalletComponent struct {
+	Header         ComponentHeader
+	Money          int64
+	MoneySpent     int64
+	MoneyPrevFrame int64
+	HasReachedInf  bool
+}
+
+type WorldStateComponent struct {
+	Header           ComponentHeader
+	BiomeCryptCount  int32
+	GodsAfraid       int32
+	GodsImpressed    int32
+	GodsAfraidDamage int32
+	GodsEnraged      int32
+}
+
 type GameGlobals struct {
 	FrameCount       int32
 	PhysicsStepCount int32
@@ -249,6 +225,31 @@ type GameGlobals struct {
 	ViewportTop      float32
 	ViewportRight    float32
 	ViewportBottom   float32
+}
+
+type Inventory2Component struct {
+	Header               ComponentHeader
+	QuickInventorySlots  int32
+	FullInventorySlotsX  int32
+	FullInventorySlotsY  int32
+	SavedActiveItemIndex int32
+	ActiveItem           int32
+	ActualActiveItem     int32
+	ActiveStash          int32
+	ThrowItem            int32
+	ItemHolstered        bool
+	Initialized          bool
+	ForceRefresh         bool
+	DontLogNextItemEquip bool
+	SmoothedItemXOffset  float32
+	LastItemSwitchFrame  int32
+	IntroEquipItemLerp   float32
+	SmoothedItemAngleX   float32
+	SmoothedItemAngleY   float32
+}
+
+type DeathMatchApp struct {
+	PlayerEntities StdVectorHeader
 }
 
 func ReadMsvcString(ctx *runtime.ReadContext, addr uintptr) (*MsvcString, runtime.Errors) {
@@ -412,229 +413,6 @@ func ReadEntity(ctx *runtime.ReadContext, addr uintptr) (*Entity, runtime.Errors
 	return result, errs
 }
 
-func ReadComponentHeader(ctx *runtime.ReadContext, addr uintptr) (*ComponentHeader, runtime.Errors) {
-	var errs runtime.Errors
-	result := &ComponentHeader{}
-	var buf [4]byte
-
-	// Field: Vtable at offset 0
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
-		errs.Add("ComponentHeader.Vtable", uintptr(int64(addr)+0), err)
-	} else {
-		result.Vtable = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: BufferIndex at offset 4
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
-		errs.Add("ComponentHeader.BufferIndex", uintptr(int64(addr)+4), err)
-	} else {
-		result.BufferIndex = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: PTypeName at offset 8
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+8); err != nil {
-		errs.Add("ComponentHeader.PTypeName", uintptr(int64(addr)+8), err)
-	} else {
-		result.PTypeName = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: TypeId at offset 12
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+12); err != nil {
-		errs.Add("ComponentHeader.TypeId", uintptr(int64(addr)+12), err)
-	} else {
-		result.TypeId = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: Unknown10 at offset 16
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+16); err != nil {
-		errs.Add("ComponentHeader.Unknown10", uintptr(int64(addr)+16), err)
-	} else {
-		result.Unknown10 = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: Active at offset 20
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+20); err != nil {
-		errs.Add("ComponentHeader.Active", uintptr(int64(addr)+20), err)
-	} else {
-		result.Active = buf[0] != 0
-	}
-
-	// Field: ComponentTags (array[32]) at offset 24
-	if _, err := ctx.ReadAt(result.ComponentTags[:], int64(addr)+24); err != nil {
-		errs.Add("ComponentHeader.ComponentTags", uintptr(int64(addr)+24), err)
-	}
-
-	// Field: Unknown38 at offset 56
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+56); err != nil {
-		errs.Add("ComponentHeader.Unknown38", uintptr(int64(addr)+56), err)
-	} else {
-		result.Unknown38 = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: Unknown3c at offset 60
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+60); err != nil {
-		errs.Add("ComponentHeader.Unknown3c", uintptr(int64(addr)+60), err)
-	} else {
-		result.Unknown3c = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: Unknown40 at offset 64
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+64); err != nil {
-		errs.Add("ComponentHeader.Unknown40", uintptr(int64(addr)+64), err)
-	} else {
-		result.Unknown40 = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: Unknown44 at offset 68
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+68); err != nil {
-		errs.Add("ComponentHeader.Unknown44", uintptr(int64(addr)+68), err)
-	} else {
-		result.Unknown44 = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	return result, errs
-}
-
-func ReadWalletComponent(ctx *runtime.ReadContext, addr uintptr) (*WalletComponent, runtime.Errors) {
-	var errs runtime.Errors
-	result := &WalletComponent{}
-	var buf [8]byte
-
-	// Field: Header at offset 0
-	{
-		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
-		if child != nil {
-			result.Header = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: Money at offset 72
-	if _, err := ctx.ReadAt(buf[:8], int64(addr)+72); err != nil {
-		errs.Add("WalletComponent.Money", uintptr(int64(addr)+72), err)
-	} else {
-		result.Money = int64(binary.LittleEndian.Uint64(buf[:8]))
-	}
-
-	// Field: MoneySpent at offset 80
-	if _, err := ctx.ReadAt(buf[:8], int64(addr)+80); err != nil {
-		errs.Add("WalletComponent.MoneySpent", uintptr(int64(addr)+80), err)
-	} else {
-		result.MoneySpent = int64(binary.LittleEndian.Uint64(buf[:8]))
-	}
-
-	// Field: MoneyPrevFrame at offset 88
-	if _, err := ctx.ReadAt(buf[:8], int64(addr)+88); err != nil {
-		errs.Add("WalletComponent.MoneyPrevFrame", uintptr(int64(addr)+88), err)
-	} else {
-		result.MoneyPrevFrame = int64(binary.LittleEndian.Uint64(buf[:8]))
-	}
-
-	// Field: HasReachedInf at offset 96
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+96); err != nil {
-		errs.Add("WalletComponent.HasReachedInf", uintptr(int64(addr)+96), err)
-	} else {
-		result.HasReachedInf = buf[0] != 0
-	}
-
-	return result, errs
-}
-
-func ReadCharacterDataComponent(ctx *runtime.ReadContext, addr uintptr) (*CharacterDataComponent, runtime.Errors) {
-	var errs runtime.Errors
-	result := &CharacterDataComponent{}
-	var buf [4]byte
-
-	// Field: Header at offset 0
-	{
-		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
-		if child != nil {
-			result.Header = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: Gravity at offset 136
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+136); err != nil {
-		errs.Add("CharacterDataComponent.Gravity", uintptr(int64(addr)+136), err)
-	} else {
-		result.Gravity = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: FlyTime at offset 140
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+140); err != nil {
-		errs.Add("CharacterDataComponent.FlyTime", uintptr(int64(addr)+140), err)
-	} else {
-		result.FlyTime = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: IsOnGround at offset 184
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+184); err != nil {
-		errs.Add("CharacterDataComponent.IsOnGround", uintptr(int64(addr)+184), err)
-	} else {
-		result.IsOnGround = buf[0] != 0
-	}
-
-	// Field: VelocityX at offset 264
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+264); err != nil {
-		errs.Add("CharacterDataComponent.VelocityX", uintptr(int64(addr)+264), err)
-	} else {
-		result.VelocityX = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: VelocityY at offset 268
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+268); err != nil {
-		errs.Add("CharacterDataComponent.VelocityY", uintptr(int64(addr)+268), err)
-	} else {
-		result.VelocityY = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	return result, errs
-}
-
-func ReadConfigGun(ctx *runtime.ReadContext, addr uintptr) (*ConfigGun, runtime.Errors) {
-	var errs runtime.Errors
-	result := &ConfigGun{}
-	var buf [4]byte
-
-	// Field: Vtable at offset 0
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
-		errs.Add("ConfigGun.Vtable", uintptr(int64(addr)+0), err)
-	} else {
-		result.Vtable = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: ActionsPerRound at offset 4
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
-		errs.Add("ConfigGun.ActionsPerRound", uintptr(int64(addr)+4), err)
-	} else {
-		result.ActionsPerRound = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: ShuffleDeckWhenEmpty at offset 8
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+8); err != nil {
-		errs.Add("ConfigGun.ShuffleDeckWhenEmpty", uintptr(int64(addr)+8), err)
-	} else {
-		result.ShuffleDeckWhenEmpty = buf[0] != 0
-	}
-
-	// Field: ReloadTime at offset 12
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+12); err != nil {
-		errs.Add("ConfigGun.ReloadTime", uintptr(int64(addr)+12), err)
-	} else {
-		result.ReloadTime = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: DeckCapacity at offset 16
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+16); err != nil {
-		errs.Add("ConfigGun.DeckCapacity", uintptr(int64(addr)+16), err)
-	} else {
-		result.DeckCapacity = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	return result, errs
-}
-
 func ReadStdVectorHeader(ctx *runtime.ReadContext, addr uintptr) (*StdVectorHeader, runtime.Errors) {
 	var errs runtime.Errors
 	result := &StdVectorHeader{}
@@ -659,71 +437,6 @@ func ReadStdVectorHeader(ctx *runtime.ReadContext, addr uintptr) (*StdVectorHead
 		errs.Add("StdVectorHeader.CapacityPtr", uintptr(int64(addr)+8), err)
 	} else {
 		result.CapacityPtr = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	return result, errs
-}
-
-func ReadEntityManager(ctx *runtime.ReadContext, addr uintptr) (*EntityManager, runtime.Errors) {
-	var errs runtime.Errors
-	result := &EntityManager{}
-	var buf [4]byte
-
-	// Field: Vtable at offset 0
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
-		errs.Add("EntityManager.Vtable", uintptr(int64(addr)+0), err)
-	} else {
-		result.Vtable = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: NextEntityId at offset 4
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
-		errs.Add("EntityManager.NextEntityId", uintptr(int64(addr)+4), err)
-	} else {
-		result.NextEntityId = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: FreeSlotStack at offset 8
-	{
-		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+8))
-		if child != nil {
-			result.FreeSlotStack = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: EntityArray at offset 20
-	{
-		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+20))
-		if child != nil {
-			result.EntityArray = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: TagGroups at offset 32
-	{
-		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+32))
-		if child != nil {
-			result.TagGroups = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: ComponentBuffers at offset 44
-	{
-		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+44))
-		if child != nil {
-			result.ComponentBuffers = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: PEventManager at offset 56
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+56); err != nil {
-		errs.Add("EntityManager.PEventManager", uintptr(int64(addr)+56), err)
-	} else {
-		result.PEventManager = binary.LittleEndian.Uint32(buf[:4])
 	}
 
 	return result, errs
@@ -876,6 +589,89 @@ func ReadComponentBuffer(ctx *runtime.ReadContext, addr uintptr) (*ComponentBuff
 			result.NameString = *child
 		}
 		errs = append(errs, childErrs...)
+	}
+
+	return result, errs
+}
+
+func ReadComponentHeader(ctx *runtime.ReadContext, addr uintptr) (*ComponentHeader, runtime.Errors) {
+	var errs runtime.Errors
+	result := &ComponentHeader{}
+	var buf [4]byte
+
+	// Field: Vtable at offset 0
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
+		errs.Add("ComponentHeader.Vtable", uintptr(int64(addr)+0), err)
+	} else {
+		result.Vtable = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: BufferIndex at offset 4
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
+		errs.Add("ComponentHeader.BufferIndex", uintptr(int64(addr)+4), err)
+	} else {
+		result.BufferIndex = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: PTypeName at offset 8
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+8); err != nil {
+		errs.Add("ComponentHeader.PTypeName", uintptr(int64(addr)+8), err)
+	} else {
+		result.PTypeName = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: TypeId at offset 12
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+12); err != nil {
+		errs.Add("ComponentHeader.TypeId", uintptr(int64(addr)+12), err)
+	} else {
+		result.TypeId = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: Unknown10 at offset 16
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+16); err != nil {
+		errs.Add("ComponentHeader.Unknown10", uintptr(int64(addr)+16), err)
+	} else {
+		result.Unknown10 = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: Active at offset 20
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+20); err != nil {
+		errs.Add("ComponentHeader.Active", uintptr(int64(addr)+20), err)
+	} else {
+		result.Active = buf[0] != 0
+	}
+
+	// Field: ComponentTags (array[32]) at offset 24
+	if _, err := ctx.ReadAt(result.ComponentTags[:], int64(addr)+24); err != nil {
+		errs.Add("ComponentHeader.ComponentTags", uintptr(int64(addr)+24), err)
+	}
+
+	// Field: Unknown38 at offset 56
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+56); err != nil {
+		errs.Add("ComponentHeader.Unknown38", uintptr(int64(addr)+56), err)
+	} else {
+		result.Unknown38 = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: Unknown3c at offset 60
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+60); err != nil {
+		errs.Add("ComponentHeader.Unknown3c", uintptr(int64(addr)+60), err)
+	} else {
+		result.Unknown3c = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: Unknown40 at offset 64
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+64); err != nil {
+		errs.Add("ComponentHeader.Unknown40", uintptr(int64(addr)+64), err)
+	} else {
+		result.Unknown40 = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: Unknown44 at offset 68
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+68); err != nil {
+		errs.Add("ComponentHeader.Unknown44", uintptr(int64(addr)+68), err)
+	} else {
+		result.Unknown44 = binary.LittleEndian.Uint32(buf[:4])
 	}
 
 	return result, errs
@@ -1052,270 +848,44 @@ func ReadDamageModelComponent(ctx *runtime.ReadContext, addr uintptr) (*DamageMo
 	return result, errs
 }
 
-func ReadInventory2Component(ctx *runtime.ReadContext, addr uintptr) (*Inventory2Component, runtime.Errors) {
+func ReadConfigGun(ctx *runtime.ReadContext, addr uintptr) (*ConfigGun, runtime.Errors) {
 	var errs runtime.Errors
-	result := &Inventory2Component{}
+	result := &ConfigGun{}
 	var buf [4]byte
 
-	// Field: Header at offset 0
-	{
-		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
-		if child != nil {
-			result.Header = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: QuickInventorySlots at offset 72
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+72); err != nil {
-		errs.Add("Inventory2Component.QuickInventorySlots", uintptr(int64(addr)+72), err)
-	} else {
-		result.QuickInventorySlots = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: FullInventorySlotsX at offset 76
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+76); err != nil {
-		errs.Add("Inventory2Component.FullInventorySlotsX", uintptr(int64(addr)+76), err)
-	} else {
-		result.FullInventorySlotsX = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: FullInventorySlotsY at offset 80
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+80); err != nil {
-		errs.Add("Inventory2Component.FullInventorySlotsY", uintptr(int64(addr)+80), err)
-	} else {
-		result.FullInventorySlotsY = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: SavedActiveItemIndex at offset 84
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+84); err != nil {
-		errs.Add("Inventory2Component.SavedActiveItemIndex", uintptr(int64(addr)+84), err)
-	} else {
-		result.SavedActiveItemIndex = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: ActiveItem at offset 88
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+88); err != nil {
-		errs.Add("Inventory2Component.ActiveItem", uintptr(int64(addr)+88), err)
-	} else {
-		result.ActiveItem = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: ActualActiveItem at offset 92
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+92); err != nil {
-		errs.Add("Inventory2Component.ActualActiveItem", uintptr(int64(addr)+92), err)
-	} else {
-		result.ActualActiveItem = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: ActiveStash at offset 96
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+96); err != nil {
-		errs.Add("Inventory2Component.ActiveStash", uintptr(int64(addr)+96), err)
-	} else {
-		result.ActiveStash = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: ThrowItem at offset 100
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+100); err != nil {
-		errs.Add("Inventory2Component.ThrowItem", uintptr(int64(addr)+100), err)
-	} else {
-		result.ThrowItem = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: ItemHolstered at offset 104
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+104); err != nil {
-		errs.Add("Inventory2Component.ItemHolstered", uintptr(int64(addr)+104), err)
-	} else {
-		result.ItemHolstered = buf[0] != 0
-	}
-
-	// Field: Initialized at offset 105
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+105); err != nil {
-		errs.Add("Inventory2Component.Initialized", uintptr(int64(addr)+105), err)
-	} else {
-		result.Initialized = buf[0] != 0
-	}
-
-	// Field: ForceRefresh at offset 106
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+106); err != nil {
-		errs.Add("Inventory2Component.ForceRefresh", uintptr(int64(addr)+106), err)
-	} else {
-		result.ForceRefresh = buf[0] != 0
-	}
-
-	// Field: DontLogNextItemEquip at offset 107
-	if _, err := ctx.ReadAt(buf[:1], int64(addr)+107); err != nil {
-		errs.Add("Inventory2Component.DontLogNextItemEquip", uintptr(int64(addr)+107), err)
-	} else {
-		result.DontLogNextItemEquip = buf[0] != 0
-	}
-
-	// Field: SmoothedItemXOffset at offset 108
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+108); err != nil {
-		errs.Add("Inventory2Component.SmoothedItemXOffset", uintptr(int64(addr)+108), err)
-	} else {
-		result.SmoothedItemXOffset = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: LastItemSwitchFrame at offset 112
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+112); err != nil {
-		errs.Add("Inventory2Component.LastItemSwitchFrame", uintptr(int64(addr)+112), err)
-	} else {
-		result.LastItemSwitchFrame = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: IntroEquipItemLerp at offset 116
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+116); err != nil {
-		errs.Add("Inventory2Component.IntroEquipItemLerp", uintptr(int64(addr)+116), err)
-	} else {
-		result.IntroEquipItemLerp = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: SmoothedItemAngleX at offset 120
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+120); err != nil {
-		errs.Add("Inventory2Component.SmoothedItemAngleX", uintptr(int64(addr)+120), err)
-	} else {
-		result.SmoothedItemAngleX = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: SmoothedItemAngleY at offset 124
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+124); err != nil {
-		errs.Add("Inventory2Component.SmoothedItemAngleY", uintptr(int64(addr)+124), err)
-	} else {
-		result.SmoothedItemAngleY = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	return result, errs
-}
-
-func ReadWorldManagerViewRect(ctx *runtime.ReadContext, addr uintptr) (*WorldManagerViewRect, runtime.Errors) {
-	var errs runtime.Errors
-	result := &WorldManagerViewRect{}
-	var buf [4]byte
-
-	// Field: ViewX at offset 0
+	// Field: Vtable at offset 0
 	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
-		errs.Add("WorldManagerViewRect.ViewX", uintptr(int64(addr)+0), err)
+		errs.Add("ConfigGun.Vtable", uintptr(int64(addr)+0), err)
 	} else {
-		result.ViewX = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+		result.Vtable = binary.LittleEndian.Uint32(buf[:4])
 	}
 
-	// Field: ViewY at offset 4
+	// Field: ActionsPerRound at offset 4
 	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
-		errs.Add("WorldManagerViewRect.ViewY", uintptr(int64(addr)+4), err)
+		errs.Add("ConfigGun.ActionsPerRound", uintptr(int64(addr)+4), err)
 	} else {
-		result.ViewY = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+		result.ActionsPerRound = int32(binary.LittleEndian.Uint32(buf[:4]))
 	}
 
-	// Field: ViewWidth at offset 8
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+8); err != nil {
-		errs.Add("WorldManagerViewRect.ViewWidth", uintptr(int64(addr)+8), err)
+	// Field: ShuffleDeckWhenEmpty at offset 8
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+8); err != nil {
+		errs.Add("ConfigGun.ShuffleDeckWhenEmpty", uintptr(int64(addr)+8), err)
 	} else {
-		result.ViewWidth = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+		result.ShuffleDeckWhenEmpty = buf[0] != 0
 	}
 
-	// Field: ViewHeight at offset 12
+	// Field: ReloadTime at offset 12
 	if _, err := ctx.ReadAt(buf[:4], int64(addr)+12); err != nil {
-		errs.Add("WorldManagerViewRect.ViewHeight", uintptr(int64(addr)+12), err)
+		errs.Add("ConfigGun.ReloadTime", uintptr(int64(addr)+12), err)
 	} else {
-		result.ViewHeight = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+		result.ReloadTime = int32(binary.LittleEndian.Uint32(buf[:4]))
 	}
 
-	return result, errs
-}
-
-func ReadDeathMatchApp(ctx *runtime.ReadContext, addr uintptr) (*DeathMatchApp, runtime.Errors) {
-	var errs runtime.Errors
-	result := &DeathMatchApp{}
-
-	// Field: PlayerEntities at offset 88
-	{
-		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+88))
-		if child != nil {
-			result.PlayerEntities = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	return result, errs
-}
-
-func ReadWorldStateComponent(ctx *runtime.ReadContext, addr uintptr) (*WorldStateComponent, runtime.Errors) {
-	var errs runtime.Errors
-	result := &WorldStateComponent{}
-	var buf [4]byte
-
-	// Field: Header at offset 0
-	{
-		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
-		if child != nil {
-			result.Header = *child
-		}
-		errs = append(errs, childErrs...)
-	}
-
-	// Field: BiomeCryptCount at offset 264
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+264); err != nil {
-		errs.Add("WorldStateComponent.BiomeCryptCount", uintptr(int64(addr)+264), err)
+	// Field: DeckCapacity at offset 16
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+16); err != nil {
+		errs.Add("ConfigGun.DeckCapacity", uintptr(int64(addr)+16), err)
 	} else {
-		result.BiomeCryptCount = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: GodsAfraid at offset 268
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+268); err != nil {
-		errs.Add("WorldStateComponent.GodsAfraid", uintptr(int64(addr)+268), err)
-	} else {
-		result.GodsAfraid = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: GodsImpressed at offset 272
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+272); err != nil {
-		errs.Add("WorldStateComponent.GodsImpressed", uintptr(int64(addr)+272), err)
-	} else {
-		result.GodsImpressed = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: GodsAfraidDamage at offset 276
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+276); err != nil {
-		errs.Add("WorldStateComponent.GodsAfraidDamage", uintptr(int64(addr)+276), err)
-	} else {
-		result.GodsAfraidDamage = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	// Field: GodsEnraged at offset 280
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+280); err != nil {
-		errs.Add("WorldStateComponent.GodsEnraged", uintptr(int64(addr)+280), err)
-	} else {
-		result.GodsEnraged = int32(binary.LittleEndian.Uint32(buf[:4]))
-	}
-
-	return result, errs
-}
-
-func ReadChildrenContainer(ctx *runtime.ReadContext, addr uintptr) (*ChildrenContainer, runtime.Errors) {
-	var errs runtime.Errors
-	result := &ChildrenContainer{}
-	var buf [4]byte
-
-	// Field: BeginPtr at offset 0
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
-		errs.Add("ChildrenContainer.BeginPtr", uintptr(int64(addr)+0), err)
-	} else {
-		result.BeginPtr = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: EndPtr at offset 4
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
-		errs.Add("ChildrenContainer.EndPtr", uintptr(int64(addr)+4), err)
-	} else {
-		result.EndPtr = binary.LittleEndian.Uint32(buf[:4])
-	}
-
-	// Field: CapacityPtr at offset 8
-	if _, err := ctx.ReadAt(buf[:4], int64(addr)+8); err != nil {
-		errs.Add("ChildrenContainer.CapacityPtr", uintptr(int64(addr)+8), err)
-	} else {
-		result.CapacityPtr = binary.LittleEndian.Uint32(buf[:4])
+		result.DeckCapacity = int32(binary.LittleEndian.Uint32(buf[:4]))
 	}
 
 	return result, errs
@@ -1688,6 +1258,285 @@ func ReadAbilityComponent(ctx *runtime.ReadContext, addr uintptr) (*AbilityCompo
 	return result, errs
 }
 
+func ReadChildrenContainer(ctx *runtime.ReadContext, addr uintptr) (*ChildrenContainer, runtime.Errors) {
+	var errs runtime.Errors
+	result := &ChildrenContainer{}
+	var buf [4]byte
+
+	// Field: BeginPtr at offset 0
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
+		errs.Add("ChildrenContainer.BeginPtr", uintptr(int64(addr)+0), err)
+	} else {
+		result.BeginPtr = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: EndPtr at offset 4
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
+		errs.Add("ChildrenContainer.EndPtr", uintptr(int64(addr)+4), err)
+	} else {
+		result.EndPtr = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: CapacityPtr at offset 8
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+8); err != nil {
+		errs.Add("ChildrenContainer.CapacityPtr", uintptr(int64(addr)+8), err)
+	} else {
+		result.CapacityPtr = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	return result, errs
+}
+
+func ReadEntityManager(ctx *runtime.ReadContext, addr uintptr) (*EntityManager, runtime.Errors) {
+	var errs runtime.Errors
+	result := &EntityManager{}
+	var buf [4]byte
+
+	// Field: Vtable at offset 0
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
+		errs.Add("EntityManager.Vtable", uintptr(int64(addr)+0), err)
+	} else {
+		result.Vtable = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	// Field: NextEntityId at offset 4
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
+		errs.Add("EntityManager.NextEntityId", uintptr(int64(addr)+4), err)
+	} else {
+		result.NextEntityId = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: FreeSlotStack at offset 8
+	{
+		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+8))
+		if child != nil {
+			result.FreeSlotStack = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: EntityArray at offset 20
+	{
+		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+20))
+		if child != nil {
+			result.EntityArray = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: TagGroups at offset 32
+	{
+		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+32))
+		if child != nil {
+			result.TagGroups = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: ComponentBuffers at offset 44
+	{
+		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+44))
+		if child != nil {
+			result.ComponentBuffers = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: PEventManager at offset 56
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+56); err != nil {
+		errs.Add("EntityManager.PEventManager", uintptr(int64(addr)+56), err)
+	} else {
+		result.PEventManager = binary.LittleEndian.Uint32(buf[:4])
+	}
+
+	return result, errs
+}
+
+func ReadCharacterDataComponent(ctx *runtime.ReadContext, addr uintptr) (*CharacterDataComponent, runtime.Errors) {
+	var errs runtime.Errors
+	result := &CharacterDataComponent{}
+	var buf [4]byte
+
+	// Field: Header at offset 0
+	{
+		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
+		if child != nil {
+			result.Header = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: Gravity at offset 136
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+136); err != nil {
+		errs.Add("CharacterDataComponent.Gravity", uintptr(int64(addr)+136), err)
+	} else {
+		result.Gravity = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: FlyTime at offset 140
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+140); err != nil {
+		errs.Add("CharacterDataComponent.FlyTime", uintptr(int64(addr)+140), err)
+	} else {
+		result.FlyTime = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: IsOnGround at offset 184
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+184); err != nil {
+		errs.Add("CharacterDataComponent.IsOnGround", uintptr(int64(addr)+184), err)
+	} else {
+		result.IsOnGround = buf[0] != 0
+	}
+
+	// Field: VelocityX at offset 264
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+264); err != nil {
+		errs.Add("CharacterDataComponent.VelocityX", uintptr(int64(addr)+264), err)
+	} else {
+		result.VelocityX = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: VelocityY at offset 268
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+268); err != nil {
+		errs.Add("CharacterDataComponent.VelocityY", uintptr(int64(addr)+268), err)
+	} else {
+		result.VelocityY = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	return result, errs
+}
+
+func ReadWorldManagerViewRect(ctx *runtime.ReadContext, addr uintptr) (*WorldManagerViewRect, runtime.Errors) {
+	var errs runtime.Errors
+	result := &WorldManagerViewRect{}
+	var buf [4]byte
+
+	// Field: ViewX at offset 0
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+0); err != nil {
+		errs.Add("WorldManagerViewRect.ViewX", uintptr(int64(addr)+0), err)
+	} else {
+		result.ViewX = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ViewY at offset 4
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+4); err != nil {
+		errs.Add("WorldManagerViewRect.ViewY", uintptr(int64(addr)+4), err)
+	} else {
+		result.ViewY = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ViewWidth at offset 8
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+8); err != nil {
+		errs.Add("WorldManagerViewRect.ViewWidth", uintptr(int64(addr)+8), err)
+	} else {
+		result.ViewWidth = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ViewHeight at offset 12
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+12); err != nil {
+		errs.Add("WorldManagerViewRect.ViewHeight", uintptr(int64(addr)+12), err)
+	} else {
+		result.ViewHeight = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	return result, errs
+}
+
+func ReadWalletComponent(ctx *runtime.ReadContext, addr uintptr) (*WalletComponent, runtime.Errors) {
+	var errs runtime.Errors
+	result := &WalletComponent{}
+	var buf [8]byte
+
+	// Field: Header at offset 0
+	{
+		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
+		if child != nil {
+			result.Header = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: Money at offset 72
+	if _, err := ctx.ReadAt(buf[:8], int64(addr)+72); err != nil {
+		errs.Add("WalletComponent.Money", uintptr(int64(addr)+72), err)
+	} else {
+		result.Money = int64(binary.LittleEndian.Uint64(buf[:8]))
+	}
+
+	// Field: MoneySpent at offset 80
+	if _, err := ctx.ReadAt(buf[:8], int64(addr)+80); err != nil {
+		errs.Add("WalletComponent.MoneySpent", uintptr(int64(addr)+80), err)
+	} else {
+		result.MoneySpent = int64(binary.LittleEndian.Uint64(buf[:8]))
+	}
+
+	// Field: MoneyPrevFrame at offset 88
+	if _, err := ctx.ReadAt(buf[:8], int64(addr)+88); err != nil {
+		errs.Add("WalletComponent.MoneyPrevFrame", uintptr(int64(addr)+88), err)
+	} else {
+		result.MoneyPrevFrame = int64(binary.LittleEndian.Uint64(buf[:8]))
+	}
+
+	// Field: HasReachedInf at offset 96
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+96); err != nil {
+		errs.Add("WalletComponent.HasReachedInf", uintptr(int64(addr)+96), err)
+	} else {
+		result.HasReachedInf = buf[0] != 0
+	}
+
+	return result, errs
+}
+
+func ReadWorldStateComponent(ctx *runtime.ReadContext, addr uintptr) (*WorldStateComponent, runtime.Errors) {
+	var errs runtime.Errors
+	result := &WorldStateComponent{}
+	var buf [4]byte
+
+	// Field: Header at offset 0
+	{
+		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
+		if child != nil {
+			result.Header = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: BiomeCryptCount at offset 264
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+264); err != nil {
+		errs.Add("WorldStateComponent.BiomeCryptCount", uintptr(int64(addr)+264), err)
+	} else {
+		result.BiomeCryptCount = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: GodsAfraid at offset 268
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+268); err != nil {
+		errs.Add("WorldStateComponent.GodsAfraid", uintptr(int64(addr)+268), err)
+	} else {
+		result.GodsAfraid = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: GodsImpressed at offset 272
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+272); err != nil {
+		errs.Add("WorldStateComponent.GodsImpressed", uintptr(int64(addr)+272), err)
+	} else {
+		result.GodsImpressed = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: GodsAfraidDamage at offset 276
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+276); err != nil {
+		errs.Add("WorldStateComponent.GodsAfraidDamage", uintptr(int64(addr)+276), err)
+	} else {
+		result.GodsAfraidDamage = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: GodsEnraged at offset 280
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+280); err != nil {
+		errs.Add("WorldStateComponent.GodsEnraged", uintptr(int64(addr)+280), err)
+	} else {
+		result.GodsEnraged = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	return result, errs
+}
+
 func ReadGameGlobals(ctx *runtime.ReadContext, addr uintptr) (*GameGlobals, runtime.Errors) {
 	var errs runtime.Errors
 	result := &GameGlobals{}
@@ -1789,6 +1638,158 @@ func ReadGameGlobals(ctx *runtime.ReadContext, addr uintptr) (*GameGlobals, runt
 		errs.Add("GameGlobals.ViewportBottom", uintptr(int64(addr)+396), err)
 	} else {
 		result.ViewportBottom = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	return result, errs
+}
+
+func ReadInventory2Component(ctx *runtime.ReadContext, addr uintptr) (*Inventory2Component, runtime.Errors) {
+	var errs runtime.Errors
+	result := &Inventory2Component{}
+	var buf [4]byte
+
+	// Field: Header at offset 0
+	{
+		child, childErrs := ReadComponentHeader(ctx, uintptr(int64(addr)+0))
+		if child != nil {
+			result.Header = *child
+		}
+		errs = append(errs, childErrs...)
+	}
+
+	// Field: QuickInventorySlots at offset 72
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+72); err != nil {
+		errs.Add("Inventory2Component.QuickInventorySlots", uintptr(int64(addr)+72), err)
+	} else {
+		result.QuickInventorySlots = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: FullInventorySlotsX at offset 76
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+76); err != nil {
+		errs.Add("Inventory2Component.FullInventorySlotsX", uintptr(int64(addr)+76), err)
+	} else {
+		result.FullInventorySlotsX = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: FullInventorySlotsY at offset 80
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+80); err != nil {
+		errs.Add("Inventory2Component.FullInventorySlotsY", uintptr(int64(addr)+80), err)
+	} else {
+		result.FullInventorySlotsY = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: SavedActiveItemIndex at offset 84
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+84); err != nil {
+		errs.Add("Inventory2Component.SavedActiveItemIndex", uintptr(int64(addr)+84), err)
+	} else {
+		result.SavedActiveItemIndex = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ActiveItem at offset 88
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+88); err != nil {
+		errs.Add("Inventory2Component.ActiveItem", uintptr(int64(addr)+88), err)
+	} else {
+		result.ActiveItem = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ActualActiveItem at offset 92
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+92); err != nil {
+		errs.Add("Inventory2Component.ActualActiveItem", uintptr(int64(addr)+92), err)
+	} else {
+		result.ActualActiveItem = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ActiveStash at offset 96
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+96); err != nil {
+		errs.Add("Inventory2Component.ActiveStash", uintptr(int64(addr)+96), err)
+	} else {
+		result.ActiveStash = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ThrowItem at offset 100
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+100); err != nil {
+		errs.Add("Inventory2Component.ThrowItem", uintptr(int64(addr)+100), err)
+	} else {
+		result.ThrowItem = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: ItemHolstered at offset 104
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+104); err != nil {
+		errs.Add("Inventory2Component.ItemHolstered", uintptr(int64(addr)+104), err)
+	} else {
+		result.ItemHolstered = buf[0] != 0
+	}
+
+	// Field: Initialized at offset 105
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+105); err != nil {
+		errs.Add("Inventory2Component.Initialized", uintptr(int64(addr)+105), err)
+	} else {
+		result.Initialized = buf[0] != 0
+	}
+
+	// Field: ForceRefresh at offset 106
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+106); err != nil {
+		errs.Add("Inventory2Component.ForceRefresh", uintptr(int64(addr)+106), err)
+	} else {
+		result.ForceRefresh = buf[0] != 0
+	}
+
+	// Field: DontLogNextItemEquip at offset 107
+	if _, err := ctx.ReadAt(buf[:1], int64(addr)+107); err != nil {
+		errs.Add("Inventory2Component.DontLogNextItemEquip", uintptr(int64(addr)+107), err)
+	} else {
+		result.DontLogNextItemEquip = buf[0] != 0
+	}
+
+	// Field: SmoothedItemXOffset at offset 108
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+108); err != nil {
+		errs.Add("Inventory2Component.SmoothedItemXOffset", uintptr(int64(addr)+108), err)
+	} else {
+		result.SmoothedItemXOffset = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: LastItemSwitchFrame at offset 112
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+112); err != nil {
+		errs.Add("Inventory2Component.LastItemSwitchFrame", uintptr(int64(addr)+112), err)
+	} else {
+		result.LastItemSwitchFrame = int32(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: IntroEquipItemLerp at offset 116
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+116); err != nil {
+		errs.Add("Inventory2Component.IntroEquipItemLerp", uintptr(int64(addr)+116), err)
+	} else {
+		result.IntroEquipItemLerp = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: SmoothedItemAngleX at offset 120
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+120); err != nil {
+		errs.Add("Inventory2Component.SmoothedItemAngleX", uintptr(int64(addr)+120), err)
+	} else {
+		result.SmoothedItemAngleX = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	// Field: SmoothedItemAngleY at offset 124
+	if _, err := ctx.ReadAt(buf[:4], int64(addr)+124); err != nil {
+		errs.Add("Inventory2Component.SmoothedItemAngleY", uintptr(int64(addr)+124), err)
+	} else {
+		result.SmoothedItemAngleY = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+	}
+
+	return result, errs
+}
+
+func ReadDeathMatchApp(ctx *runtime.ReadContext, addr uintptr) (*DeathMatchApp, runtime.Errors) {
+	var errs runtime.Errors
+	result := &DeathMatchApp{}
+
+	// Field: PlayerEntities at offset 88
+	{
+		child, childErrs := ReadStdVectorHeader(ctx, uintptr(int64(addr)+88))
+		if child != nil {
+			result.PlayerEntities = *child
+		}
+		errs = append(errs, childErrs...)
 	}
 
 	return result, errs

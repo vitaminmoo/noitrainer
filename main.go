@@ -282,37 +282,46 @@ func (m model) viewPlayer() string {
 }
 
 func (m model) viewWands() string {
-	if len(m.state.Wands) == 0 {
-		return dimStyle.Render("No wands found")
+	if len(m.state.Wands) == 0 && len(m.state.Items) == 0 {
+		return dimStyle.Render("No inventory items found")
 	}
 
 	var sections []string
-	for i, w := range m.state.Wands {
+
+	// Wands
+	for i, item := range m.state.Wands {
+		w := item.Ability
 		var rows []string
-		name := noita.MsvcStringValue(&w.UiName, m.reader.Ctx)
+		name := item.Name(m.reader.Ctx)
 		if name == "" {
 			name = fmt.Sprintf("Wand %d", i+1)
 		}
-
-		rows = append(rows, row("Mana", manaStyle.Render(fmt.Sprintf("%.0f / %.0f", w.Mana, w.ManaMax))))
-		rows = append(rows, row("Mana Regen", fmt.Sprintf("%.1f/frame", w.ManaChargeSpeed)))
-		rows = append(rows, row("Cast Delay", fmt.Sprintf("%d frames", w.CooldownFrames)))
-		rows = append(rows, row("Reload Time", fmt.Sprintf("%d frames", w.ReloadTimeFrames)))
 
 		gc := w.GunConfig
 		rows = append(rows, row("Spells/Cast", fmt.Sprintf("%d", gc.ActionsPerRound)))
 		rows = append(rows, row("Deck Capacity", fmt.Sprintf("%d", gc.DeckCapacity)))
 		rows = append(rows, row("Shuffle", boolStr(gc.ShuffleDeckWhenEmpty)))
+		rows = append(rows, row("Mana", manaStyle.Render(fmt.Sprintf("%.0f / %.0f", w.Mana, w.ManaMax))))
+		rows = append(rows, row("Mana Regen", fmt.Sprintf("%.0f/s", w.ManaChargeSpeed*60)))
+		rows = append(rows, row("Reload Time", fmt.Sprintf("%.2fs (%d frames)", float64(gc.ReloadTime)/60.0, gc.ReloadTime)))
 
 		if w.ReloadFramesLeft > 0 {
-			rows = append(rows, row("Reload Left", fmt.Sprintf("%d frames", w.ReloadFramesLeft)))
+			rows = append(rows, row("Reloading", fmt.Sprintf("%d frames left", w.ReloadFramesLeft)))
 		}
 
-		entityFile := noita.MsvcStringValue(&w.EntityFile, m.reader.Ctx)
-		if entityFile != "" {
-			rows = append(rows, row("Projectile", entityFile))
-		}
+		sections = append(sections, renderSection(name, rows))
+	}
 
+	// Items (potions, powder pouches, etc.)
+	for _, item := range m.state.Items {
+		var rows []string
+		for _, mat := range item.Contents {
+			rows = append(rows, row(mat.Name, fmt.Sprintf("%.0f cells", mat.Amount)))
+		}
+		if len(rows) == 0 {
+			rows = append(rows, dimStyle.Render("empty"))
+		}
+		name := item.Name(m.reader.Ctx)
 		sections = append(sections, renderSection(name, rows))
 	}
 
