@@ -174,7 +174,7 @@ func (c entityCategory) color() string {
 }
 
 func categorize(e *noita.EntitySummary) entityCategory {
-	has := make(map[int]bool)
+	has := make(map[noita.TypeID]bool)
 	for _, id := range e.ComponentIDs {
 		has[id] = true
 	}
@@ -183,29 +183,29 @@ func categorize(e *noita.EntitySummary) entityCategory {
 		strings.HasPrefix(e.Name, "inventory_") || e.Name == "player_stats" {
 		return catPlayer
 	}
-	if has[noita.TypeAnimalAIComponent] || strings.HasPrefix(e.Name, "$animal_") {
+	if has[noita.TypeIDAnimalAIComponent] || strings.HasPrefix(e.Name, "$animal_") {
 		return catEnemy
 	}
-	if has[noita.TypeTorchComponent] {
+	if has[noita.TypeIDTorchComponent] {
 		return catTorch
 	}
-	if has[noita.TypeItemComponent] || has[noita.TypeAbilityComponent] {
+	if has[noita.TypeIDItemComponent] || has[noita.TypeIDAbilityComponent] {
 		return catItem
 	}
-	if has[noita.TypeGameEffectComponent] {
+	if has[noita.TypeIDGameEffectComponent] {
 		return catEffect
 	}
-	if has[noita.TypeVerletPhysicsComponent] && !has[noita.TypeDamageModelComponent] {
+	if has[noita.TypeIDVerletPhysicsComponent] && !has[noita.TypeIDDamageModelComponent] {
 		return catProp
 	}
-	if has[noita.TypeSimplePhysicsComponent] || has[noita.TypePixelSpriteComponent] {
+	if has[noita.TypeIDSimplePhysicsComponent] || has[noita.TypeIDPixelSpriteComponent] {
 		return catPhysics
 	}
 	return catOther
 }
 
 func subcategorize(e *noita.EntitySummary) string {
-	has := make(map[int]bool)
+	has := make(map[noita.TypeID]bool)
 	for _, id := range e.ComponentIDs {
 		has[id] = true
 	}
@@ -231,48 +231,48 @@ func subcategorize(e *noita.EntitySummary) string {
 		return "unknown"
 	case catItem:
 		switch {
-		case has[noita.TypePotionComponent]:
+		case has[noita.TypeIDPotionComponent]:
 			return "potion"
-		case has[noita.TypeAbilityComponent] && has[noita.TypeManaReloaderComponent]:
+		case has[noita.TypeIDAbilityComponent] && has[noita.TypeIDManaReloaderComponent]:
 			return "wand"
-		case has[noita.TypeItemActionComponent]:
+		case has[noita.TypeIDItemActionComponent]:
 			return "spell"
-		case has[noita.TypeAbilityComponent]:
+		case has[noita.TypeIDAbilityComponent]:
 			return "holdable"
 		default:
 			return "pickup"
 		}
 	case catTorch:
-		if has[noita.TypePhysicsBody2Component] {
+		if has[noita.TypeIDPhysicsBody2Component] {
 			return "physics"
 		}
 		return "static"
 	case catPhysics:
-		if has[noita.TypeLuaComponent] {
+		if has[noita.TypeIDLuaComponent] {
 			return "scripted"
 		}
 		return "debris"
 	case catProp:
-		if has[noita.TypeVerletWorldJointComponent] {
+		if has[noita.TypeIDVerletWorldJointComponent] {
 			return "hanging"
 		}
 		return "loose"
 	case catEffect:
-		if has[noita.TypeInheritTransformComponent] {
+		if has[noita.TypeIDInheritTransformComponent] {
 			return "attached"
 		}
 		return "standalone"
 	default:
-		if has[noita.TypeCollisionTriggerComponent] {
+		if has[noita.TypeIDCollisionTriggerComponent] {
 			return "trigger"
 		}
-		if has[noita.TypeVariableStorageComponent] {
+		if has[noita.TypeIDVariableStorageComponent] {
 			return "variable"
 		}
-		if has[noita.TypeWorldStateComponent] {
+		if has[noita.TypeIDWorldStateComponent] {
 			return "world"
 		}
-		if has[noita.TypeCameraBoundComponent] {
+		if has[noita.TypeIDCameraBoundComponent] {
 			return "camera"
 		}
 		return "misc"

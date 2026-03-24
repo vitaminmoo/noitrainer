@@ -22,87 +22,6 @@ const (
 	AddrOrbPersistence = 0x01207404
 )
 
-// Component type IDs (runtime-assigned, resolved via PTypeName from live process).
-const (
-	TypeAbilityComponent                    = 3
-	TypeAnimalAIComponent                   = 6
-	TypeAudioComponent                      = 10
-	TypeAudioListenerComponent              = 11
-	TypeAudioLoopComponent                  = 12
-	TypeBiomeTrackerComponent               = 13
-	TypeCameraBoundComponent                = 18
-	TypeCharacterCollisionComponent         = 21
-	TypeCharacterDataComponent              = 22
-	TypeCharacterPlatformingComponent       = 23
-	TypeCollisionTriggerComponent           = 25
-	TypeControlsComponent                   = 28
-	TypeDamageModelComponent                = 31
-	TypeDrugEffectComponent                 = 38
-	TypeElectricityReceiverComponent        = 42
-	TypeExplodeOnDamageComponent            = 46
-	TypeGameEffectComponent                 = 53
-	TypeGameLogComponent                    = 54
-	TypeGameStatsComponent                  = 55
-	TypeGenomeDataComponent                 = 57
-	TypeGunComponent                        = 60
-	TypeHitboxComponent                     = 63
-	TypeHotspotComponent                    = 65
-	TypeIngestionComponent                  = 70
-	TypeInheritTransformComponent           = 71
-	TypeInteractableComponent               = 72
-	TypeInventory2Component                 = 73
-	TypeInventoryGuiComponent               = 75
-	TypeItemActionComponent                 = 77
-	TypeItemAlchemyComponent                = 78
-	TypeItemChestComponent                  = 79
-	TypeItemComponent                       = 80
-	TypeItemCostComponent                   = 81
-	TypeItemPickUpperComponent              = 82
-	TypeKickComponent                       = 85
-	TypeLifetimeComponent                   = 88
-	TypeLightComponent                      = 89
-	TypeLiquidDisplacerComponent            = 92
-	TypeLuaComponent                        = 96
-	TypeManaReloaderComponent               = 99
-	TypeMaterialAreaCheckerComponent        = 100
-	TypeMaterialInventoryComponent          = 101
-	TypeMaterialSuckerComponent             = 103
-	TypeMusicEnergyAffectorComponent        = 105
-	TypeParticleEmitterComponent            = 109
-	TypePathFindingComponent                = 110
-	TypePathFindingGridMarkerComponent      = 111
-	TypePhysicsBody2Component               = 113
-	TypePhysicsBodyCollisionDamageComponent = 114
-	TypePhysicsBodyComponent                = 115
-	TypePhysicsImageShapeComponent          = 116
-	TypePhysicsJointComponent               = 119
-	TypePhysicsPickUpComponent              = 121
-	TypePhysicsThrowableComponent           = 124
-	TypePixelSpriteComponent                = 126
-	TypePlatformShooterPlayerComponent      = 127
-	TypePlayerCollisionComponent            = 128
-	TypePlayerStatsComponent                = 129
-	TypePositionSeedComponent               = 130
-	TypePotionComponent                     = 131
-	TypeProjectileComponent                 = 133
-	TypeSimplePhysicsComponent              = 138
-	TypeSpriteAnimatorComponent             = 140
-	TypeSpriteComponent                     = 141
-	TypeSpriteOffsetAnimatorComponent       = 142
-	TypeSpriteParticleEmitterComponent      = 143
-	TypeSpriteStainsComponent               = 144
-	TypeStatusEffectDataComponent           = 145
-	TypeStreamingKeepAliveComponent         = 146
-	TypeTorchComponent                      = 151
-	TypeUIInfoComponent                     = 153
-	TypeVariableStorageComponent            = 154
-	TypeVelocityComponent                   = 155
-	TypeVerletPhysicsComponent              = 156
-	TypeVerletWorldJointComponent           = 158
-	TypeWalletComponent                     = 159
-	TypeWorldStateComponent                 = 161
-)
-
 // CellData stride in the CellFactory material array.
 const cellDataStride = 0x290
 
@@ -145,7 +64,7 @@ type EntitySummary struct {
 	HasWallet    bool
 	HasAbility   bool
 	HasCharData  bool
-	ComponentIDs []int // all component type IDs present on this entity
+	ComponentIDs []TypeID // all component type IDs present on this entity
 }
 
 // EntityDetails holds full component data for a selected entity.
@@ -162,7 +81,7 @@ type EntityDetails struct {
 
 // ComponentBufferInfo holds metadata about a component buffer (type).
 type ComponentBufferInfo struct {
-	TypeID      int
+	TypeIndex   int
 	Name        string
 	ActiveCount int32
 	Capacity    int32
@@ -349,10 +268,10 @@ func (r *Reader) ReadState() *GameState {
 	}
 
 	// Read components for the player entity
-	gs.PlayerHP = readComponent[DamageModelComponent](r, em, gs.PlayerEntity.SlotIndex, TypeDamageModelComponent, ReadDamageModelComponent)
-	gs.PlayerWallet = readComponent[WalletComponent](r, em, gs.PlayerEntity.SlotIndex, TypeWalletComponent, ReadWalletComponent)
-	gs.PlayerChar = readComponent[CharacterDataComponent](r, em, gs.PlayerEntity.SlotIndex, TypeCharacterDataComponent, ReadCharacterDataComponent)
-	gs.PlayerInv = readComponent[Inventory2Component](r, em, gs.PlayerEntity.SlotIndex, TypeInventory2Component, ReadInventory2Component)
+	gs.PlayerHP = readComponent[DamageModelComponent](r, em, gs.PlayerEntity.SlotIndex, TypeIDDamageModelComponent, ReadDamageModelComponent)
+	gs.PlayerWallet = readComponent[WalletComponent](r, em, gs.PlayerEntity.SlotIndex, TypeIDWalletComponent, ReadWalletComponent)
+	gs.PlayerChar = readComponent[CharacterDataComponent](r, em, gs.PlayerEntity.SlotIndex, TypeIDCharacterDataComponent, ReadCharacterDataComponent)
+	gs.PlayerInv = readComponent[Inventory2Component](r, em, gs.PlayerEntity.SlotIndex, TypeIDInventory2Component, ReadInventory2Component)
 
 	// Read inventory
 	allItems := r.findInventoryItems(em, gs.PlayerEntity)
@@ -398,7 +317,7 @@ func (r *Reader) readMaterialName(matID int) string {
 
 // readPotionContents reads MaterialInventoryComponent for an entity and returns non-zero materials.
 func (r *Reader) readPotionContents(em *EntityManager, slotIndex int32) []MaterialContent {
-	mic := readComponent[MaterialInventoryComponent](r, em, slotIndex, TypeMaterialInventoryComponent, ReadMaterialInventoryComponent)
+	mic := readComponent[MaterialInventoryComponent](r, em, slotIndex, TypeIDMaterialInventoryComponent, ReadMaterialInventoryComponent)
 	if mic == nil {
 		return nil
 	}
@@ -416,15 +335,15 @@ func (r *Reader) readPotionContents(em *EntityManager, slotIndex int32) []Materi
 }
 
 // lookupComponentBufferPtr returns the ComponentBuffer pointer for a given type ID.
-func lookupComponentBufferPtr(em *EntityManager, typeID int) uint32 {
-	if em == nil || typeID >= len(em.ComponentBuffers.Elements) {
+func lookupComponentBufferPtr(em *EntityManager, typeID TypeID) uint32 {
+	if em == nil || int(typeID) >= len(em.ComponentBuffers.Elements) {
 		return 0
 	}
-	return em.ComponentBuffers.Elements[typeID]
+	return em.ComponentBuffers.Elements[int(typeID)]
 }
 
 // findComponentPtr resolves a component pointer using lazy ComponentBuffer reads.
-func (r *Reader) findComponentPtr(em *EntityManager, slotIndex int32, typeID int) uint32 {
+func (r *Reader) findComponentPtr(em *EntityManager, slotIndex int32, typeID TypeID) uint32 {
 	bufferPtr := lookupComponentBufferPtr(em, typeID)
 	if bufferPtr == 0 {
 		return 0
@@ -453,7 +372,7 @@ func (r *Reader) findComponentPtr(em *EntityManager, slotIndex int32, typeID int
 }
 
 // hasComponent checks if an entity has a component type, reading minimal data.
-func (r *Reader) hasComponent(em *EntityManager, slotIndex int32, typeID int) bool {
+func (r *Reader) hasComponent(em *EntityManager, slotIndex int32, typeID TypeID) bool {
 	bufferPtr := lookupComponentBufferPtr(em, typeID)
 	if bufferPtr == 0 {
 		return false
@@ -503,7 +422,7 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 			continue
 		}
 
-		if ac := readComponent[AbilityComponent](r, em, child.SlotIndex, TypeAbilityComponent, ReadAbilityComponent); ac != nil {
+		if ac := readComponent[AbilityComponent](r, em, child.SlotIndex, TypeIDAbilityComponent, ReadAbilityComponent); ac != nil {
 			item := &InventoryItem{Entity: child, Ability: ac}
 			if !item.IsWand() {
 				item.Contents = r.readPotionContents(em, child.SlotIndex)
@@ -520,7 +439,7 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 			if grandchild == nil || grandchild.PendingKill >= 1 {
 				continue
 			}
-			if ac := readComponent[AbilityComponent](r, em, grandchild.SlotIndex, TypeAbilityComponent, ReadAbilityComponent); ac != nil {
+			if ac := readComponent[AbilityComponent](r, em, grandchild.SlotIndex, TypeIDAbilityComponent, ReadAbilityComponent); ac != nil {
 				item := &InventoryItem{Entity: grandchild, Ability: ac}
 				if !item.IsWand() {
 					item.Contents = r.readPotionContents(em, grandchild.SlotIndex)
@@ -586,10 +505,10 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 			Entity:       entity,
 			Name:         name,
 			Ptr:          ePtr,
-			HasHP:        r.hasComponent(em, slotIndex, TypeDamageModelComponent),
-			HasWallet:    r.hasComponent(em, slotIndex, TypeWalletComponent),
-			HasAbility:   r.hasComponent(em, slotIndex, TypeAbilityComponent),
-			HasCharData:  r.hasComponent(em, slotIndex, TypeCharacterDataComponent),
+			HasHP:        r.hasComponent(em, slotIndex, TypeIDDamageModelComponent),
+			HasWallet:    r.hasComponent(em, slotIndex, TypeIDWalletComponent),
+			HasAbility:   r.hasComponent(em, slotIndex, TypeIDAbilityComponent),
+			HasCharData:  r.hasComponent(em, slotIndex, TypeIDCharacterDataComponent),
 			ComponentIDs: compIDs,
 		}
 		summaries = append(summaries, summary)
@@ -615,11 +534,11 @@ func (r *Reader) ReadEntityDetails(entityPtr uint32) *EntityDetails {
 	details := &EntityDetails{
 		Entity:  e,
 		Name:    MsvcStringValue(&e.Name, r.Ctx),
-		HP:      readComponent[DamageModelComponent](r, em, e.SlotIndex, TypeDamageModelComponent, ReadDamageModelComponent),
-		Wallet:  readComponent[WalletComponent](r, em, e.SlotIndex, TypeWalletComponent, ReadWalletComponent),
-		Char:    readComponent[CharacterDataComponent](r, em, e.SlotIndex, TypeCharacterDataComponent, ReadCharacterDataComponent),
-		Inv:     readComponent[Inventory2Component](r, em, e.SlotIndex, TypeInventory2Component, ReadInventory2Component),
-		Ability: readComponent[AbilityComponent](r, em, e.SlotIndex, TypeAbilityComponent, ReadAbilityComponent),
+		HP:      readComponent[DamageModelComponent](r, em, e.SlotIndex, TypeIDDamageModelComponent, ReadDamageModelComponent),
+		Wallet:  readComponent[WalletComponent](r, em, e.SlotIndex, TypeIDWalletComponent, ReadWalletComponent),
+		Char:    readComponent[CharacterDataComponent](r, em, e.SlotIndex, TypeIDCharacterDataComponent, ReadCharacterDataComponent),
+		Inv:     readComponent[Inventory2Component](r, em, e.SlotIndex, TypeIDInventory2Component, ReadInventory2Component),
+		Ability: readComponent[AbilityComponent](r, em, e.SlotIndex, TypeIDAbilityComponent, ReadAbilityComponent),
 	}
 
 	// Read children
@@ -711,7 +630,7 @@ func (r *Reader) ReadComponentBuffers() []*ComponentBufferInfo {
 		}
 		capacity, _ := cbr.CapacityLimit()
 		infos = append(infos, &ComponentBufferInfo{
-			TypeID:      i,
+			TypeIndex:   i,
 			Name:        name,
 			ActiveCount: activeCount,
 			Capacity:    capacity,
@@ -732,12 +651,12 @@ func (r *Reader) ReadEntityManagerPtr() (*EntityManager, uint32) {
 }
 
 // FindEntityComponentIDs returns all component type IDs that an entity has.
-func (r *Reader) FindEntityComponentIDs(em *EntityManager, slotIndex int32) []int {
+func (r *Reader) FindEntityComponentIDs(em *EntityManager, slotIndex int32) []TypeID {
 	if slotIndex < 0 || em == nil {
 		return nil
 	}
 
-	var ids []int
+	var ids []TypeID
 	for typeID, bufPtr := range em.ComponentBuffers.Elements {
 		if bufPtr == 0 {
 			continue
@@ -759,13 +678,13 @@ func (r *Reader) FindEntityComponentIDs(em *EntityManager, slotIndex int32) []in
 		if err != nil || denseIdx < 0 {
 			continue
 		}
-		ids = append(ids, typeID)
+		ids = append(ids, TypeID(typeID))
 	}
 	return ids
 }
 
 // ReadRawComponent reads raw bytes for an arbitrary component type at a given entity slot.
-func (r *Reader) ReadRawComponent(em *EntityManager, slotIndex int32, typeID int, size int) (uint32, []byte) {
+func (r *Reader) ReadRawComponent(em *EntityManager, slotIndex int32, typeID TypeID, size int) (uint32, []byte) {
 	compPtr := r.findComponentPtr(em, slotIndex, typeID)
 	if compPtr == 0 {
 		return 0, nil
@@ -780,7 +699,7 @@ func (r *Reader) ReadRawComponent(em *EntityManager, slotIndex int32, typeID int
 type readFunc[T any] func(ctx *runtime.ReadContext, addr uintptr) (*T, runtime.Errors)
 
 // readComponent looks up a single component for an entity via the ECS sparse-dense index.
-func readComponent[T any](r *Reader, em *EntityManager, slotIndex int32, typeID int, readFn readFunc[T]) *T {
+func readComponent[T any](r *Reader, em *EntityManager, slotIndex int32, typeID TypeID, readFn readFunc[T]) *T {
 	components := readAllComponents(r, em, slotIndex, typeID, readFn)
 	if len(components) > 0 {
 		return components[0]
@@ -789,7 +708,7 @@ func readComponent[T any](r *Reader, em *EntityManager, slotIndex int32, typeID 
 }
 
 // readAllComponents reads all components of a given type for an entity, following the linked chain.
-func readAllComponents[T any](r *Reader, em *EntityManager, slotIndex int32, typeID int, readFn readFunc[T]) []*T {
+func readAllComponents[T any](r *Reader, em *EntityManager, slotIndex int32, typeID TypeID, readFn readFunc[T]) []*T {
 	if slotIndex < 0 {
 		return nil
 	}

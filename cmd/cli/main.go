@@ -90,7 +90,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		cmdDump(int32(entityID), typeID, size)
+		cmdDump(int32(entityID), noita.TypeID(typeID), size)
 	case "components":
 		if len(os.Args) < 3 {
 			fmt.Fprintf(os.Stderr, "Usage: noitrainer-cli components <entity-id>\n")
@@ -123,11 +123,11 @@ func connect() (*noita.Reader, *process.Process) {
 }
 
 // buildBufferNameMap returns a map of type ID -> component name from the buffer registry.
-func buildBufferNameMap(reader *noita.Reader) map[int]string {
-	names := make(map[int]string)
+func buildBufferNameMap(reader *noita.Reader) map[noita.TypeID]string {
+	names := make(map[noita.TypeID]string)
 	for _, b := range reader.ReadComponentBuffers() {
 		if b.Name != "" {
-			names[b.TypeID] = b.Name
+			names[noita.TypeID(b.TypeIndex)] = b.Name
 		}
 	}
 	return names
@@ -439,13 +439,13 @@ func cmdBuffers() {
 			name = "(unnamed)"
 		}
 		fmt.Printf("%-6d %-45s %-10d %-10d 0x%08X\n",
-			b.TypeID, truncate(name, 44), b.ActiveCount, b.Capacity, b.Ptr)
+			b.TypeIndex, truncate(name, 44), b.ActiveCount, b.Capacity, b.Ptr)
 	}
 }
 
 // ── dump ───────────────────────────────────────────────────────────
 
-func cmdDump(entityID int32, typeID int, size int) {
+func cmdDump(entityID int32, typeID noita.TypeID, size int) {
 	reader, _ := connect()
 
 	e := findEntityByID(reader, entityID)
@@ -535,7 +535,7 @@ func cmdCategorize() {
 		sig      string
 		names    map[string]int
 		count    int
-		compIDs  []int
+		compIDs  []noita.TypeID
 	}
 	bySig := make(map[string]*sigGroup)
 	for _, e := range entities {
