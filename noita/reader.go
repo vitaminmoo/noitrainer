@@ -1,12 +1,11 @@
 package noita
 
-//go:generate go run github.com/vitaminmoo/memtools/cmd/hexpatgen@latest -i noita.hexpat -o noita_gen.go -pkg noita
+//go:generate go run github.com/vitaminmoo/memtools/cmd/hexpatgen -i noita.hexpat -o noita_gen.go -pkg noita
 
 import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math"
 
 	"github.com/vitaminmoo/memtools/hexpat/runtime"
 )
@@ -23,23 +22,89 @@ const (
 	AddrOrbPersistence = 0x01207404
 )
 
-// Component type IDs (runtime-assigned, validated from dumps).
+// Component type IDs (runtime-assigned, resolved via PTypeName from live process).
 const (
-	TypeAbilityComponent           = 3
-	TypeCharacterDataComponent     = 22
-	TypeDamageModelComponent       = 31
-	TypeInventory2Component        = 73
-	TypeMaterialInventoryComponent = 101
-	TypeWalletComponent            = 159
-	TypeWorldStateComponent        = 161
+	TypeAbilityComponent                    = 3
+	TypeAnimalAIComponent                   = 6
+	TypeAudioComponent                      = 10
+	TypeAudioListenerComponent              = 11
+	TypeAudioLoopComponent                  = 12
+	TypeBiomeTrackerComponent               = 13
+	TypeCameraBoundComponent                = 18
+	TypeCharacterCollisionComponent         = 21
+	TypeCharacterDataComponent              = 22
+	TypeCharacterPlatformingComponent       = 23
+	TypeCollisionTriggerComponent           = 25
+	TypeControlsComponent                   = 28
+	TypeDamageModelComponent                = 31
+	TypeDrugEffectComponent                 = 38
+	TypeElectricityReceiverComponent        = 42
+	TypeExplodeOnDamageComponent            = 46
+	TypeGameEffectComponent                 = 53
+	TypeGameLogComponent                    = 54
+	TypeGameStatsComponent                  = 55
+	TypeGenomeDataComponent                 = 57
+	TypeGunComponent                        = 60
+	TypeHitboxComponent                     = 63
+	TypeHotspotComponent                    = 65
+	TypeIngestionComponent                  = 70
+	TypeInheritTransformComponent           = 71
+	TypeInteractableComponent               = 72
+	TypeInventory2Component                 = 73
+	TypeInventoryGuiComponent               = 75
+	TypeItemActionComponent                 = 77
+	TypeItemAlchemyComponent                = 78
+	TypeItemChestComponent                  = 79
+	TypeItemComponent                       = 80
+	TypeItemCostComponent                   = 81
+	TypeItemPickUpperComponent              = 82
+	TypeKickComponent                       = 85
+	TypeLifetimeComponent                   = 88
+	TypeLightComponent                      = 89
+	TypeLiquidDisplacerComponent            = 92
+	TypeLuaComponent                        = 96
+	TypeManaReloaderComponent               = 99
+	TypeMaterialAreaCheckerComponent        = 100
+	TypeMaterialInventoryComponent          = 101
+	TypeMaterialSuckerComponent             = 103
+	TypeMusicEnergyAffectorComponent        = 105
+	TypeParticleEmitterComponent            = 109
+	TypePathFindingComponent                = 110
+	TypePathFindingGridMarkerComponent      = 111
+	TypePhysicsBody2Component               = 113
+	TypePhysicsBodyCollisionDamageComponent = 114
+	TypePhysicsBodyComponent                = 115
+	TypePhysicsImageShapeComponent          = 116
+	TypePhysicsJointComponent               = 119
+	TypePhysicsPickUpComponent              = 121
+	TypePhysicsThrowableComponent           = 124
+	TypePixelSpriteComponent                = 126
+	TypePlatformShooterPlayerComponent      = 127
+	TypePlayerCollisionComponent            = 128
+	TypePlayerStatsComponent                = 129
+	TypePositionSeedComponent               = 130
+	TypePotionComponent                     = 131
+	TypeProjectileComponent                 = 133
+	TypeSimplePhysicsComponent              = 138
+	TypeSpriteAnimatorComponent             = 140
+	TypeSpriteComponent                     = 141
+	TypeSpriteOffsetAnimatorComponent       = 142
+	TypeSpriteParticleEmitterComponent      = 143
+	TypeSpriteStainsComponent               = 144
+	TypeStatusEffectDataComponent           = 145
+	TypeStreamingKeepAliveComponent         = 146
+	TypeTorchComponent                      = 151
+	TypeUIInfoComponent                     = 153
+	TypeVariableStorageComponent            = 154
+	TypeVelocityComponent                   = 155
+	TypeVerletPhysicsComponent              = 156
+	TypeVerletWorldJointComponent           = 158
+	TypeWalletComponent                     = 159
+	TypeWorldStateComponent                 = 161
 )
 
-// CellFactory material array: inline CellData structs at stride 0x290, base at CellFactory+0x18.
-// CellData+0x00 = name (24-byte MsvcString).
-const (
-	cellDataStride         = 0x290
-	cellFactoryArrayOffset = 0x18
-)
+// CellData stride in the CellFactory material array.
+const cellDataStride = 0x290
 
 // GameState holds a snapshot of all interesting game data.
 type GameState struct {
@@ -61,14 +126,49 @@ type GameState struct {
 	Wands        []*InventoryItem
 	Items        []*InventoryItem
 
-	// Camera from WorldManager (GameGlobals.pWorldManager -> viewX/Y/W/H)
+	// All entities in the world
+	Entities []*EntitySummary
+
+	// Camera from WorldManager
 	CameraX float32
 	CameraY float32
 	ViewW   float32
 	ViewH   float32
 }
 
-// MsvcStringValue extracts the Go string from an MsvcString.
+// EntitySummary holds basic info about an entity for list display.
+type EntitySummary struct {
+	Entity       *Entity
+	Name         string
+	Ptr          uint32
+	HasHP        bool
+	HasWallet    bool
+	HasAbility   bool
+	HasCharData  bool
+	ComponentIDs []int // all component type IDs present on this entity
+}
+
+// EntityDetails holds full component data for a selected entity.
+type EntityDetails struct {
+	Entity   *Entity
+	Name     string
+	HP       *DamageModelComponent
+	Wallet   *WalletComponent
+	Char     *CharacterDataComponent
+	Inv      *Inventory2Component
+	Ability  *AbilityComponent
+	Children []*EntitySummary
+}
+
+// ComponentBufferInfo holds metadata about a component buffer (type).
+type ComponentBufferInfo struct {
+	TypeID      int
+	Name        string
+	ActiveCount int32
+	Capacity    int32
+	Ptr         uint32
+}
+
 // MaterialContent represents a material and its amount in a container.
 type MaterialContent struct {
 	MaterialID int
@@ -102,14 +202,12 @@ func MsvcStringValue(s *MsvcString, ctx *runtime.ReadContext) string {
 		return ""
 	}
 	if s.Capacity <= 15 {
-		// Inline SSO: data is in the first Length bytes
 		n := s.Length
 		if n > 16 {
 			n = 16
 		}
 		return string(s.Data[:n])
 	}
-	// Heap-allocated: first 4 bytes of Data are a pointer
 	heapPtr := binary.LittleEndian.Uint32(s.Data[:4])
 	if heapPtr == 0 {
 		return "<null>"
@@ -151,12 +249,14 @@ func (r *Reader) readS32(addr int64) (int32, error) {
 	return int32(v), err
 }
 
-func (r *Reader) readF32(addr int64) (float32, error) {
-	var buf [4]byte
-	if _, err := r.Ctx.ReadAt(buf[:], addr); err != nil {
-		return 0, err
+// readEM reads the EntityManager via its static pointer.
+func (r *Reader) readEM() *EntityManager {
+	emPtr, err := r.readU32(AddrEntityManager)
+	if err != nil || emPtr == 0 {
+		return nil
 	}
-	return math.Float32frombits(binary.LittleEndian.Uint32(buf[:])), nil
+	em, _ := ReadEntityManager(r.Ctx, uintptr(emPtr))
+	return em
 }
 
 // ReadState reads a complete game state snapshot.
@@ -179,15 +279,14 @@ func (r *Reader) ReadState() *GameState {
 	if globalsPtr, err := r.readU32(AddrGameGlobals); err == nil && globalsPtr != 0 {
 		gs.Globals, _ = ReadGameGlobals(r.Ctx, uintptr(globalsPtr))
 
-		// Read camera from WorldManager (pWorldManager -> viewX/Y/W/H at +0x00..+0x0C)
+		// Read camera from WorldManager view rect
 		if gs.Globals != nil && gs.Globals.PWorldManager != 0 {
-			wm := int64(gs.Globals.PWorldManager)
-			gs.ViewW, _ = r.readF32(wm + 0x08)
-			gs.ViewH, _ = r.readF32(wm + 0x0C)
-			viewX, _ := r.readF32(wm + 0x00)
-			viewY, _ := r.readF32(wm + 0x04)
-			gs.CameraX = viewX + gs.ViewW*0.5
-			gs.CameraY = viewY + gs.ViewH*0.5
+			if vr, _ := ReadWorldManagerViewRect(r.Ctx, uintptr(gs.Globals.PWorldManager)); vr != nil {
+				gs.ViewW = vr.ViewWidth
+				gs.ViewH = vr.ViewHeight
+				gs.CameraX = vr.ViewX + vr.ViewWidth*0.5
+				gs.CameraY = vr.ViewY + vr.ViewHeight*0.5
+			}
 		}
 	}
 
@@ -202,13 +301,12 @@ func (r *Reader) ReadState() *GameState {
 		return gs
 	}
 	dma, _ := ReadDeathMatchApp(r.Ctx, uintptr(dmaPtr))
-	if dma == nil || dma.PlayerEntities.BeginPtr == 0 {
+	if dma == nil || len(dma.PlayerEntities.Elements) == 0 {
 		return gs
 	}
 
-	// Read first player entity pointer
-	playerEntityPtr, err := r.readU32(int64(dma.PlayerEntities.BeginPtr))
-	if err != nil || playerEntityPtr == 0 {
+	playerEntityPtr := dma.PlayerEntities.Elements[0]
+	if playerEntityPtr == 0 {
 		return gs
 	}
 
@@ -217,12 +315,7 @@ func (r *Reader) ReadState() *GameState {
 		return gs
 	}
 
-	// Look up components via EntityManager
-	emPtr, err := r.readU32(AddrEntityManager)
-	if err != nil || emPtr == 0 {
-		return gs
-	}
-	em, _ := ReadEntityManager(r.Ctx, uintptr(emPtr))
+	em := r.readEM()
 	if em == nil {
 		return gs
 	}
@@ -233,8 +326,7 @@ func (r *Reader) ReadState() *GameState {
 	gs.PlayerChar = readComponent[CharacterDataComponent](r, em, gs.PlayerEntity.SlotIndex, TypeCharacterDataComponent, ReadCharacterDataComponent)
 	gs.PlayerInv = readComponent[Inventory2Component](r, em, gs.PlayerEntity.SlotIndex, TypeInventory2Component, ReadInventory2Component)
 
-	// Read inventory: traverse player → children → inventory containers → children → AbilityComponent
-	// Wands/items are NOT on the player entity; they're child entities in the inventory hierarchy.
+	// Read inventory
 	allItems := r.findInventoryItems(em, gs.PlayerEntity)
 	for _, item := range allItems {
 		if item.IsWand() {
@@ -243,6 +335,9 @@ func (r *Reader) ReadState() *GameState {
 			gs.Items = append(gs.Items, item)
 		}
 	}
+
+	// Read all entities
+	gs.Entities = r.ReadEntityList()
 
 	return gs
 }
@@ -253,22 +348,20 @@ func (r *Reader) readMaterialName(matID int) string {
 	if err != nil || globalsPtr == 0 {
 		return fmt.Sprintf("mat_%d", matID)
 	}
-	cfPtr, err := r.readU32(int64(globalsPtr) + 0x18)
-	if err != nil || cfPtr == 0 {
+	globals, _ := ReadGameGlobals(r.Ctx, uintptr(globalsPtr))
+	if globals == nil || globals.PCellFactory == 0 {
 		return fmt.Sprintf("mat_%d", matID)
 	}
-	// Read base pointer to CellData array at CellFactory+0x18
-	arrayBase, err := r.readU32(int64(cfPtr) + cellFactoryArrayOffset)
-	if err != nil || arrayBase == 0 {
+	cf, _ := ReadCellFactory(r.Ctx, uintptr(globals.PCellFactory))
+	if cf == nil || cf.CellDataArrayPtr == 0 {
 		return fmt.Sprintf("mat_%d", matID)
 	}
-	// CellData[matID] at arrayBase + matID * 0x290, name is MsvcString at +0x00
-	addr := int64(arrayBase) + int64(matID)*cellDataStride
-	ms, errs := ReadMsvcString(r.Ctx, uintptr(addr))
-	if errs.HasFatal() || ms == nil {
+	addr := uintptr(cf.CellDataArrayPtr) + uintptr(matID)*cellDataStride
+	cd, _ := ReadCellData(r.Ctx, addr)
+	if cd == nil {
 		return fmt.Sprintf("mat_%d", matID)
 	}
-	name := MsvcStringValue(ms, r.Ctx)
+	name := MsvcStringValue(&cd.Name, r.Ctx)
 	if name == "" {
 		return fmt.Sprintf("mat_%d", matID)
 	}
@@ -277,32 +370,16 @@ func (r *Reader) readMaterialName(matID int) string {
 
 // readPotionContents reads MaterialInventoryComponent for an entity and returns non-zero materials.
 func (r *Reader) readPotionContents(em *EntityManager, slotIndex int32) []MaterialContent {
-	compPtr := r.findComponentPtr(em, slotIndex, TypeMaterialInventoryComponent)
-	if compPtr == 0 {
-		return nil
-	}
-	// Material count vector at MaterialInventoryComponent+0x80 (std::vector<double>)
-	vecBegin, _ := r.readU32(int64(compPtr) + 0x80)
-	vecEnd, _ := r.readU32(int64(compPtr) + 0x84)
-	if vecBegin == 0 || vecEnd <= vecBegin {
-		return nil
-	}
-	byteLen := vecEnd - vecBegin
-	numMaterials := byteLen / 8
-	if numMaterials > 1000 {
-		return nil
-	}
-	vecData := make([]byte, byteLen)
-	if _, err := r.Ctx.ReadAt(vecData, int64(vecBegin)); err != nil {
+	mic := readComponent[MaterialInventoryComponent](r, em, slotIndex, TypeMaterialInventoryComponent, ReadMaterialInventoryComponent)
+	if mic == nil {
 		return nil
 	}
 	var contents []MaterialContent
-	for i := uint32(0); i < numMaterials; i++ {
-		amount := math.Float64frombits(binary.LittleEndian.Uint64(vecData[i*8 : i*8+8]))
+	for i, amount := range mic.CountPerMaterialType.Elements {
 		if amount > 0 {
 			contents = append(contents, MaterialContent{
-				MaterialID: int(i),
-				Name:       r.readMaterialName(int(i)),
+				MaterialID: i,
+				Name:       r.readMaterialName(i),
 				Amount:     amount,
 			})
 		}
@@ -310,33 +387,59 @@ func (r *Reader) readPotionContents(em *EntityManager, slotIndex int32) []Materi
 	return contents
 }
 
-// findComponentPtr looks up a component pointer for an entity slot + type ID.
+// lookupComponentBufferPtr returns the ComponentBuffer pointer for a given type ID.
+func lookupComponentBufferPtr(em *EntityManager, typeID int) uint32 {
+	if em == nil || typeID >= len(em.ComponentBuffers.Elements) {
+		return 0
+	}
+	return em.ComponentBuffers.Elements[typeID]
+}
+
+// findComponentPtr resolves a component pointer using lazy ComponentBuffer reads.
 func (r *Reader) findComponentPtr(em *EntityManager, slotIndex int32, typeID int) uint32 {
-	if slotIndex < 0 || em == nil {
+	bufferPtr := lookupComponentBufferPtr(em, typeID)
+	if bufferPtr == 0 {
 		return 0
 	}
-	numBuffers := (em.ComponentBuffers.EndPtr - em.ComponentBuffers.BeginPtr) / 4
-	if uint32(typeID) >= numBuffers {
-		return 0
-	}
-	bufferPtr, err := r.readU32(int64(em.ComponentBuffers.BeginPtr) + int64(typeID)*4)
-	if err != nil || bufferPtr == 0 {
-		return 0
-	}
-	cb, _ := ReadComponentBuffer(r.Ctx, uintptr(bufferPtr))
-	if cb == nil {
-		return 0
-	}
-	numSparse := (cb.SparseIndex.EndPtr - cb.SparseIndex.BeginPtr) / 4
+	cbr := NewComponentBufferReader(r.Ctx, uintptr(bufferPtr))
+	sparse := cbr.SparseIndex()
+	beginPtr, _ := sparse.BeginPtr()
+	endPtr, _ := sparse.EndPtr()
+	numSparse := (endPtr - beginPtr) / 4
 	if uint32(slotIndex) >= numSparse {
 		return 0
 	}
-	denseIdx, err := r.readS32(int64(cb.SparseIndex.BeginPtr) + int64(slotIndex)*4)
+	denseIdx, err := r.readS32(int64(beginPtr) + int64(slotIndex)*4)
 	if err != nil || denseIdx < 0 {
 		return 0
 	}
-	compPtr, _ := r.readU32(int64(cb.Components.BeginPtr) + int64(denseIdx)*4)
+	comps := cbr.Components()
+	compBegin, _ := comps.BeginPtr()
+	compEnd, _ := comps.EndPtr()
+	numComps := (compEnd - compBegin) / 4
+	if uint32(denseIdx) >= numComps {
+		return 0
+	}
+	compPtr, _ := r.readU32(int64(compBegin) + int64(denseIdx)*4)
 	return compPtr
+}
+
+// hasComponent checks if an entity has a component type, reading minimal data.
+func (r *Reader) hasComponent(em *EntityManager, slotIndex int32, typeID int) bool {
+	bufferPtr := lookupComponentBufferPtr(em, typeID)
+	if bufferPtr == 0 {
+		return false
+	}
+	cbr := NewComponentBufferReader(r.Ctx, uintptr(bufferPtr))
+	sparse := cbr.SparseIndex()
+	beginPtr, _ := sparse.BeginPtr()
+	endPtr, _ := sparse.EndPtr()
+	numSparse := (endPtr - beginPtr) / 4
+	if uint32(slotIndex) >= numSparse {
+		return false
+	}
+	denseIdx, err := r.readS32(int64(beginPtr) + int64(slotIndex)*4)
+	return err == nil && denseIdx >= 0
 }
 
 // readChildEntityPtrs reads the Entity* pointers from a ChildrenContainer.
@@ -345,22 +448,13 @@ func (r *Reader) readChildEntityPtrs(childrenPtr uint32) []uint32 {
 		return nil
 	}
 	cc, _ := ReadChildrenContainer(r.Ctx, uintptr(childrenPtr))
-	if cc == nil || cc.BeginPtr == 0 || cc.EndPtr <= cc.BeginPtr {
+	if cc == nil || len(cc.Children) == 0 {
 		return nil
 	}
-	count := (cc.EndPtr - cc.BeginPtr) / 4
-	if count > 1000 {
+	if len(cc.Children) > 1000 {
 		return nil // sanity limit
 	}
-	ptrs := make([]uint32, count)
-	for i := uint32(0); i < count; i++ {
-		p, err := r.readU32(int64(cc.BeginPtr) + int64(i)*4)
-		if err != nil {
-			break
-		}
-		ptrs[i] = p
-	}
-	return ptrs
+	return cc.Children
 }
 
 // findInventoryItems traverses player children (and grandchildren) looking for entities with AbilityComponent.
@@ -371,7 +465,6 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 
 	var items []*InventoryItem
 
-	// Player → children (includes inventory container entities)
 	childPtrs := r.readChildEntityPtrs(player.ChildrenPtr)
 	for _, cp := range childPtrs {
 		if cp == 0 {
@@ -382,7 +475,6 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 			continue
 		}
 
-		// Check if this child has AbilityComponent
 		if ac := readComponent[AbilityComponent](r, em, child.SlotIndex, TypeAbilityComponent, ReadAbilityComponent); ac != nil {
 			item := &InventoryItem{Entity: child, Ability: ac}
 			if !item.IsWand() {
@@ -391,7 +483,6 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 			items = append(items, item)
 		}
 
-		// Check grandchildren (inventory container → item entities)
 		grandchildPtrs := r.readChildEntityPtrs(child.ChildrenPtr)
 		for _, gcp := range grandchildPtrs {
 			if gcp == 0 {
@@ -414,6 +505,250 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 	return items
 }
 
+// ReadEntityList reads all entities from the EntityManager and returns summaries.
+func (r *Reader) ReadEntityList() []*EntitySummary {
+	em := r.readEM()
+	if em == nil {
+		return nil
+	}
+
+	count := (em.EntityArray.EndPtr - em.EntityArray.BeginPtr) / 4
+	if count == 0 || count > 100000 {
+		return nil
+	}
+
+	// Batch read entity pointers
+	ptrBuf := make([]byte, count*4)
+	if _, err := r.Ctx.ReadAt(ptrBuf, int64(em.EntityArray.BeginPtr)); err != nil {
+		return nil
+	}
+
+	var summaries []*EntitySummary
+	for i := uint32(0); i < count; i++ {
+		ePtr := binary.LittleEndian.Uint32(ptrBuf[i*4 : i*4+4])
+		if ePtr == 0 {
+			continue
+		}
+		// Use lazy reader — only read the fields we need
+		er := NewEntityReader(r.Ctx, uintptr(ePtr))
+		pendingKill, _ := er.PendingKill()
+		if pendingKill >= 1 {
+			continue
+		}
+		slotIndex, _ := er.SlotIndex()
+		entityId, _ := er.EntityId()
+		posX, _ := er.PosX()
+		posY, _ := er.PosY()
+		nameStr, _ := er.Name().Read()
+
+		// Build a minimal Entity for the summary (avoids full eager read)
+		entity := &Entity{
+			EntityId:  entityId,
+			SlotIndex: slotIndex,
+			PosX:      posX,
+			PosY:      posY,
+		}
+		if nameStr != nil {
+			entity.Name = *nameStr
+		}
+
+		name := MsvcStringValue(&entity.Name, r.Ctx)
+		compIDs := r.FindEntityComponentIDs(em, slotIndex)
+		summary := &EntitySummary{
+			Entity:       entity,
+			Name:         name,
+			Ptr:          ePtr,
+			HasHP:        r.hasComponent(em, slotIndex, TypeDamageModelComponent),
+			HasWallet:    r.hasComponent(em, slotIndex, TypeWalletComponent),
+			HasAbility:   r.hasComponent(em, slotIndex, TypeAbilityComponent),
+			HasCharData:  r.hasComponent(em, slotIndex, TypeCharacterDataComponent),
+			ComponentIDs: compIDs,
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+// ReadEntityDetails reads full component data for a specific entity.
+func (r *Reader) ReadEntityDetails(entityPtr uint32) *EntityDetails {
+	if entityPtr == 0 {
+		return nil
+	}
+	e, _ := ReadEntity(r.Ctx, uintptr(entityPtr))
+	if e == nil {
+		return nil
+	}
+
+	em := r.readEM()
+	if em == nil {
+		return nil
+	}
+
+	details := &EntityDetails{
+		Entity:  e,
+		Name:    MsvcStringValue(&e.Name, r.Ctx),
+		HP:      readComponent[DamageModelComponent](r, em, e.SlotIndex, TypeDamageModelComponent, ReadDamageModelComponent),
+		Wallet:  readComponent[WalletComponent](r, em, e.SlotIndex, TypeWalletComponent, ReadWalletComponent),
+		Char:    readComponent[CharacterDataComponent](r, em, e.SlotIndex, TypeCharacterDataComponent, ReadCharacterDataComponent),
+		Inv:     readComponent[Inventory2Component](r, em, e.SlotIndex, TypeInventory2Component, ReadInventory2Component),
+		Ability: readComponent[AbilityComponent](r, em, e.SlotIndex, TypeAbilityComponent, ReadAbilityComponent),
+	}
+
+	// Read children
+	childPtrs := r.readChildEntityPtrs(e.ChildrenPtr)
+	for _, cp := range childPtrs {
+		if cp == 0 {
+			continue
+		}
+		child, _ := ReadEntity(r.Ctx, uintptr(cp))
+		if child == nil || child.PendingKill >= 1 {
+			continue
+		}
+		details.Children = append(details.Children, &EntitySummary{
+			Entity: child,
+			Name:   MsvcStringValue(&child.Name, r.Ctx),
+			Ptr:    cp,
+		})
+	}
+
+	return details
+}
+
+// ReadComponentTypeName reads the C string at a component's PTypeName pointer.
+func (r *Reader) ReadComponentTypeName(compPtr uint32) string {
+	if compPtr == 0 {
+		return ""
+	}
+	hdr := NewComponentHeaderReader(r.Ctx, uintptr(compPtr))
+	pTypeName, err := hdr.PTypeName()
+	if err != nil || pTypeName == 0 {
+		return ""
+	}
+	buf := make([]byte, 128)
+	if _, err := r.Ctx.ReadAt(buf, int64(pTypeName)); err != nil {
+		return ""
+	}
+	for i, b := range buf {
+		if b == 0 {
+			return string(buf[:i])
+		}
+	}
+	return string(buf)
+}
+
+// ReadComponentBuffers returns metadata for all component buffer types in the ECS.
+func (r *Reader) ReadComponentBuffers() []*ComponentBufferInfo {
+	em := r.readEM()
+	if em == nil {
+		return nil
+	}
+
+	if len(em.ComponentBuffers.Elements) == 0 {
+		return nil
+	}
+
+	var infos []*ComponentBufferInfo
+	for i, bufPtr := range em.ComponentBuffers.Elements {
+		if bufPtr == 0 {
+			continue
+		}
+		cbr := NewComponentBufferReader(r.Ctx, uintptr(bufPtr))
+		activeCount, _ := cbr.ActiveCount()
+		nameMs, _ := cbr.NameString().Read()
+		var name string
+		if nameMs != nil {
+			name = MsvcStringValue(nameMs, r.Ctx)
+		}
+		// If NameString is empty, resolve via PTypeName from an active component
+		if name == "" && activeCount > 0 {
+			comps := cbr.Components()
+			compBegin, _ := comps.BeginPtr()
+			compEnd, _ := comps.EndPtr()
+			if compBegin != 0 {
+				numComps := (compEnd - compBegin) / 4
+				for j := uint32(0); j < numComps && j < 16; j++ {
+					compPtr, err := r.readU32(int64(compBegin) + int64(j)*4)
+					if err != nil || compPtr == 0 {
+						continue
+					}
+					if n := r.ReadComponentTypeName(compPtr); n != "" {
+						name = n
+						break
+					}
+				}
+			}
+		}
+		if activeCount == 0 && name == "" {
+			continue
+		}
+		capacity, _ := cbr.CapacityLimit()
+		infos = append(infos, &ComponentBufferInfo{
+			TypeID:      i,
+			Name:        name,
+			ActiveCount: activeCount,
+			Capacity:    capacity,
+			Ptr:         bufPtr,
+		})
+	}
+	return infos
+}
+
+// ReadEntityManagerPtr returns the entity manager. Exported for CLI tools.
+func (r *Reader) ReadEntityManagerPtr() (*EntityManager, uint32) {
+	emPtr, err := r.readU32(AddrEntityManager)
+	if err != nil || emPtr == 0 {
+		return nil, 0
+	}
+	em, _ := ReadEntityManager(r.Ctx, uintptr(emPtr))
+	return em, emPtr
+}
+
+// FindEntityComponentIDs returns all component type IDs that an entity has.
+func (r *Reader) FindEntityComponentIDs(em *EntityManager, slotIndex int32) []int {
+	if slotIndex < 0 || em == nil {
+		return nil
+	}
+
+	var ids []int
+	for typeID, bufPtr := range em.ComponentBuffers.Elements {
+		if bufPtr == 0 {
+			continue
+		}
+		// Lazy read — only access ActiveCount and SparseIndex
+		cbr := NewComponentBufferReader(r.Ctx, uintptr(bufPtr))
+		activeCount, _ := cbr.ActiveCount()
+		if activeCount == 0 {
+			continue
+		}
+		sparse := cbr.SparseIndex()
+		beginPtr, _ := sparse.BeginPtr()
+		endPtr, _ := sparse.EndPtr()
+		numSparse := (endPtr - beginPtr) / 4
+		if uint32(slotIndex) >= numSparse {
+			continue
+		}
+		denseIdx, err := r.readS32(int64(beginPtr) + int64(slotIndex)*4)
+		if err != nil || denseIdx < 0 {
+			continue
+		}
+		ids = append(ids, typeID)
+	}
+	return ids
+}
+
+// ReadRawComponent reads raw bytes for an arbitrary component type at a given entity slot.
+func (r *Reader) ReadRawComponent(em *EntityManager, slotIndex int32, typeID int, size int) (uint32, []byte) {
+	compPtr := r.findComponentPtr(em, slotIndex, typeID)
+	if compPtr == 0 {
+		return 0, nil
+	}
+	buf := make([]byte, size)
+	if _, err := r.Ctx.ReadAt(buf, int64(compPtr)); err != nil {
+		return compPtr, nil
+	}
+	return compPtr, buf
+}
+
 type readFunc[T any] func(ctx *runtime.ReadContext, addr uintptr) (*T, runtime.Errors)
 
 // readComponent looks up a single component for an entity via the ECS sparse-dense index.
@@ -431,43 +766,40 @@ func readAllComponents[T any](r *Reader, em *EntityManager, slotIndex int32, typ
 		return nil
 	}
 
-	// Get component buffer pointer: componentBuffers[typeID]
-	numBuffers := (em.ComponentBuffers.EndPtr - em.ComponentBuffers.BeginPtr) / 4
-	if uint32(typeID) >= numBuffers {
+	bufferPtr := lookupComponentBufferPtr(em, typeID)
+	if bufferPtr == 0 {
 		return nil
 	}
 
-	bufferPtr, err := r.readU32(int64(em.ComponentBuffers.BeginPtr) + int64(typeID)*4)
-	if err != nil || bufferPtr == 0 {
-		return nil
-	}
-
-	cb, _ := ReadComponentBuffer(r.Ctx, uintptr(bufferPtr))
-	if cb == nil {
-		return nil
-	}
-
-	// Sparse lookup: sparseIndex[slotIndex] -> denseIndex
-	numSparse := (cb.SparseIndex.EndPtr - cb.SparseIndex.BeginPtr) / 4
+	cbr := NewComponentBufferReader(r.Ctx, uintptr(bufferPtr))
+	sparse := cbr.SparseIndex()
+	sparseBegin, _ := sparse.BeginPtr()
+	sparseEnd, _ := sparse.EndPtr()
+	numSparse := (sparseEnd - sparseBegin) / 4
 	if uint32(slotIndex) >= numSparse {
 		return nil
 	}
-
-	denseIdx, err := r.readS32(int64(cb.SparseIndex.BeginPtr) + int64(slotIndex)*4)
+	denseIdx, err := r.readS32(int64(sparseBegin) + int64(slotIndex)*4)
 	if err != nil || denseIdx < 0 {
 		return nil
 	}
 
+	comps := cbr.Components()
+	compBegin, _ := comps.BeginPtr()
+	compEnd, _ := comps.EndPtr()
+	next := cbr.NextIndex()
+	nextBegin, _ := next.BeginPtr()
+	nextEnd, _ := next.EndPtr()
+
 	var results []*T
 
 	for denseIdx >= 0 {
-		// components[denseIdx] -> component pointer
-		numComponents := (cb.Components.EndPtr - cb.Components.BeginPtr) / 4
+		numComponents := (compEnd - compBegin) / 4
 		if uint32(denseIdx) >= numComponents {
 			break
 		}
 
-		compPtr, err := r.readU32(int64(cb.Components.BeginPtr) + int64(denseIdx)*4)
+		compPtr, err := r.readU32(int64(compBegin) + int64(denseIdx)*4)
 		if err != nil || compPtr == 0 {
 			break
 		}
@@ -478,11 +810,11 @@ func readAllComponents[T any](r *Reader, em *EntityManager, slotIndex int32, typ
 		}
 
 		// Follow nextIndex chain for multiple components of same type
-		numNext := (cb.NextIndex.EndPtr - cb.NextIndex.BeginPtr) / 4
+		numNext := (nextEnd - nextBegin) / 4
 		if uint32(denseIdx) >= numNext {
 			break
 		}
-		nextIdx, err := r.readS32(int64(cb.NextIndex.BeginPtr) + int64(denseIdx)*4)
+		nextIdx, err := r.readS32(int64(nextBegin) + int64(denseIdx)*4)
 		if err != nil {
 			break
 		}

@@ -35,19 +35,40 @@ fn format_msvc_string(MsvcString s) {
     return std::format("<heap len={}>", s.length);
 };
 
-// MSVC std::vector<T> header (12 bytes)
-// begin, end, capacity_end — all 32-bit pointers
+// MSVC std::vector<T> header (12 bytes) — opaque, for vectors we don't index into
 struct StdVectorHeader {
     u32 begin_ptr;
     u32 end_ptr;
     u32 capacity_ptr;
-} [[sealed, format("format_vector")]];
+} [[sealed, static, format("format_vector")]];
 
 fn format_vector(StdVectorHeader v) {
     if (v.begin_ptr == 0) return "empty";
     u32 count = (v.end_ptr - v.begin_ptr) / 4;
     return std::format("{} elements @ 0x{:08X}", count, v.begin_ptr);
 };
+
+// Typed vectors — element data read from heap at begin_ptr
+struct U32Vector {
+    u32 begin_ptr;
+    u32 end_ptr;
+    u32 capacity_ptr;
+    u32 elements[(end_ptr - begin_ptr) / 4] @ begin_ptr;
+} [[static]];
+
+struct S32Vector {
+    u32 begin_ptr;
+    u32 end_ptr;
+    u32 capacity_ptr;
+    s32 elements[(end_ptr - begin_ptr) / 4] @ begin_ptr;
+} [[static]];
+
+struct F64Vector {
+    u32 begin_ptr;
+    u32 end_ptr;
+    u32 capacity_ptr;
+    double elements[(end_ptr - begin_ptr) / 8] @ begin_ptr;
+} [[static]];
 
 // =============================================================================
 // Forward declarations for pointer types
@@ -100,7 +121,8 @@ struct ChildrenContainer {
     u32 begin_ptr       [[comment("Entity** — first child pointer")]];
     u32 end_ptr         [[comment("Entity** — past last child")]];
     u32 capacity_ptr;
-} [[format("format_children")]];
+    u32 children[(end_ptr - begin_ptr) / 4] @ begin_ptr;
+} [[static, format("format_children")]];
 
 fn format_children(ChildrenContainer c) {
     if (c.begin_ptr == 0) return "no children";
@@ -116,14 +138,14 @@ struct EntityManager {
     // Free slot stack (std::vector<int>)
     StdVectorHeader free_slot_stack [[name("freeSlotStack")]];
 
-    // Entity array (std::vector<Entity*>)
+    // Entity array (std::vector<Entity*>) — can be 100k+ entries, read lazily
     StdVectorHeader entity_array    [[name("entityArray"), color("44FF44")]];
 
     // Tag groups (12-byte stride entries)
     StdVectorHeader tag_groups      [[name("tagGroups"), comment("NOT for component lookup")]];
 
-    // Component buffers (std::vector<ComponentBuffer*>)
-    StdVectorHeader component_buffers [[name("componentBuffers"), color("FF8844"),
+    // Component buffers (std::vector<ComponentBuffer*>) — ~162 entries
+    U32Vector component_buffers     [[name("componentBuffers"), color("FF8844"),
         comment("Indexed by runtime typeId. Use component+0x08 to discover type names.")]];
 
     u32 p_event_manager             [[name("pEventManager")]];
@@ -142,7 +164,9 @@ struct ComponentBuffer {
     u32 unknown_0c;
 
     // Sparse array: indexed by entity.slotIndex → dense index (or -1)
-    StdVectorHeader sparse_index [[name("sparseIndex"), color("FFAA44"),
+    // These are too large to read eagerly (100k+ entries) — use StdVectorHeader
+    // and index manually via readU32/readS32.
+    StdVectorHeader sparse_index    [[name("sparseIndex"), color("FFAA44"),
         comment("sparseIndex[entity.slotIndex] = denseIndex or -1")]];
 
     // Dense arrays (parallel)
@@ -460,6 +484,43 @@ struct WorldManagerViewRect {
 };
 
 // =============================================================================
+// MaterialInventoryComponent (typeId=101)
+// =============================================================================
+
+struct MaterialInventoryComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48 to +0x7F: unknown fields
+    padding[0x38];
+
+    // +0x80: std::vector<double> — material amounts indexed by material ID
+    F64Vector count_per_material_type [[name("countPerMaterialType"),
+        comment("std::vector<double>: amount[material_id]")]];
+
+    // +0x8C to end: remaining fields
+    padding[0x34];
+};
+
+// =============================================================================
+// CellFactory / CellData — material name lookup
+// =============================================================================
+
+// CellData (0x290 bytes stride) — one per material type in CellFactory array
+struct CellData {
+    MsvcString name             [[comment("Material name string")]];
+    padding[0x278]              [[comment("Remaining CellData fields")]];
+} [[static]];
+
+// CellFactory — only the fields we need for material name lookups
+struct CellFactory {
+    // +0x00 to +0x17: unknown
+    padding[0x18];
+
+    // +0x18: pointer to CellData array base
+    u32 cell_data_array_ptr     [[comment("CellData* — base of material array, stride 0x290")]];
+};
+
+// =============================================================================
 // DeathMatchApp (0xD0 bytes)
 // =============================================================================
 
@@ -467,7 +528,7 @@ struct DeathMatchApp {
     padding[0x58];
 
     // +0x58: Player entity vector (std::vector<Entity*>)
-    StdVectorHeader player_entities [[color("44FF44"),
+    U32Vector player_entities       [[color("44FF44"),
         comment("Entity* pointers (NOT entity IDs). Single-player has 1 entry.")]];
 
     // +0x64 to +0xCF
@@ -478,26 +539,179 @@ struct DeathMatchApp {
 // Static Globals
 // =============================================================================
 
-// Component type IDs (runtime-assigned, from dump validation):
-//   AbilityComponent           =   3
-//   AnimalAIComponent          =   6
-//   CharacterDataComponent     =  22
-//   ControlsComponent          =  28
-//   DamageModelComponent       =  31
-//   GameEffectComponent        =  53
-//   GenomeDataComponent        =  57
-//   HitboxComponent            =  63
-//   Inventory2Component        =  73
-//   ItemComponent              =  80
-//   LuaComponent               =  96
-//   MaterialInventoryComponent = 101
-//   PhysicsBodyComponent       = 115
-//   ProjectileComponent        = 133
-//   SpriteComponent            = 141
-//   VariableStorageComponent   = 154
-//   VelocityComponent          = 155
-//   WalletComponent            = 159
-//   WorldStateComponent        = 161
+// Component type IDs:
+//   IDs marked with * were observed at runtime; others exist in the binary
+//   but haven't been assigned slots yet (IDs are runtime-assigned and stable
+//   within a session, but unobserved types have no known ID).
+//
+//   AbilityComponent                    =   3  *
+//   AdvancedFishAIComponent             =   ?
+//   AIAttackComponent                   =   ?
+//   AIComponent                         =   ?
+//   AltarComponent                      =   ?
+//   AnimalAIComponent                   =   6  *
+//   ArcComponent                        =   ?
+//   AreaDamageComponent                 =   ?
+//   AttachToEntityComponent             =   ?
+//   AudioComponent                      =  10  *
+//   AudioListenerComponent              =  11  *
+//   AudioLoopComponent                  =  12  *
+//   BiomeTrackerComponent               =  13  *
+//   BlackHoleComponent                  =   ?
+//   BookComponent                       =   ?
+//   BossDragonComponent                 =   ?
+//   BossHealthBarComponent              =   ?
+//   CameraBoundComponent                =  18  *
+//   CardinalMovementComponent           =   ?
+//   CellEaterComponent                  =   ?
+//   CharacterCollisionComponent         =  21  *
+//   CharacterDataComponent              =  22  *
+//   CharacterPlatformingComponent       =  23  *
+//   CharacterStatsComponent             =   ?
+//   CollisionTriggerComponent           =  25  *
+//   ConsumableTeleportComponent         =   ?
+//   ControllerGoombaAIComponent         =   ?
+//   ControlsComponent                   =  28  *
+//   CrawlerAnimalComponent              =   ?
+//   CutThroughWorldDoneHereComponent    =   ?
+//   DamageModelComponent                =  31  *
+//   DamageNearbyEntitiesComponent       =   ?
+//   DebugFollowMouseComponent           =   ?
+//   DebugLogMessagesComponent           =   ?
+//   DebugSpatialVisualizerComponent     =   ?
+//   DieIfSpeedBelowComponent            =   ?
+//   DroneLauncherComponent              =   ?
+//   DrugEffectComponent                 =  38  *
+//   DrugEffectModifierComponent         =   ?
+//   ElectricChargeComponent             =   ?
+//   ElectricityComponent                =   ?
+//   ElectricityReceiverComponent        =  42  *
+//   ElectricitySourceComponent          =   ?
+//   EndingMcGuffinComponent             =   ?
+//   EnergyShieldComponent               =   ?
+//   ExplodeOnDamageComponent            =  46  *
+//   ExplosionComponent                  =   ?
+//   FishAIComponent                     =   ?
+//   FlyingComponent                     =   ?
+//   FogOfWarRadiusComponent             =   ?
+//   FogOfWarRemoverComponent            =   ?
+//   FossilComponent                     =   ?
+//   GameAreaEffectComponent             =   ?
+//   GameEffectComponent                 =  53  *
+//   GameLogComponent                    =  54  *
+//   GameStatsComponent                  =  55  *
+//   GasBubbleComponent                  =   ?
+//   GenomeDataComponent                 =  57  *
+//   GhostComponent                      =   ?
+//   GodInfoComponent                    =   ?
+//   GunComponent                        =  60  *
+//   HealthBarComponent                  =   ?
+//   HitboxComponent                     =  63  *
+//   HitEffectComponent                  =   ?
+//   HomingComponent                     =   ?
+//   HotspotComponent                    =  65  *
+//   IKLimbAttackerComponent             =   ?
+//   IKLimbComponent                     =   ?
+//   IKLimbsAnimatorComponent            =   ?
+//   IKLimbWalkerComponent               =   ?
+//   IngestionComponent                  =  70  *
+//   InheritTransformComponent           =  71  *
+//   InteractableComponent               =  72  *
+//   Inventory2Component                 =  73  *
+//   InventoryComponent                  =   ?
+//   InventoryGuiComponent               =  75  *
+//   ItemActionComponent                 =  77  *
+//   ItemAIKnowledgeComponent            =   ?
+//   ItemAlchemyComponent                =  78  *
+//   ItemChestComponent                  =  79  *
+//   ItemComponent                       =  80  *
+//   ItemCostComponent                   =  81  *
+//   ItemPickUpperComponent              =  82  *
+//   ItemRechargeNearGroundComponent     =   ?
+//   ItemStashComponent                  =   ?
+//   KickComponent                       =  85  *
+//   LaserEmitterComponent               =   ?
+//   LevitationComponent                 =   ?
+//   LifetimeComponent                   =  88  *
+//   LightComponent                      =  89  *
+//   LightningComponent                  =   ?
+//   LimbBossComponent                   =   ?
+//   LiquidDisplacerComponent            =  92  *
+//   LoadEntitiesComponent               =   ?
+//   LocationMarkerComponent             =   ?
+//   LooseGroundComponent                =   ?
+//   LuaComponent                        =  96  *
+//   MagicConvertMaterialComponent       =   ?
+//   MagicXRayComponent                  =   ?
+//   ManaReloaderComponent               =  99  *
+//   MaterialAreaCheckerComponent        = 100  *
+//   MaterialComponent                   =   ?
+//   MaterialInventoryComponent          = 101  *
+//   MaterialSeaSpawnerComponent         =   ?
+//   MaterialSuckerComponent             = 103  *
+//   MoveToSurfaceOnCreateComponent      =   ?
+//   MusicEnergyAffectorComponent        = 105  *
+//   NinjaRopeComponent                  =   ?
+//   NullDamageComponent                 =   ?
+//   OrbComponent                        =   ?
+//   ParticleEmitterComponent            = 109  *
+//   PathFindingComponent                = 110  *
+//   PathFindingGridMarkerComponent      = 111  *
+//   PhysicsAIComponent                  =   ?
+//   PhysicsBody2Component               = 113  *
+//   PhysicsBodyCollisionDamageComponent = 114  *
+//   PhysicsBodyComponent                = 115  *
+//   PhysicsImageShapeComponent          = 116  *
+//   PhysicsJoint2Component              =   ?
+//   PhysicsJoint2MutatorComponent       =   ?
+//   PhysicsJointComponent               = 119  *
+//   PhysicsKeepInWorldComponent         =   ?
+//   PhysicsPickUpComponent              = 121  *
+//   PhysicsRagdollComponent             =   ?
+//   PhysicsShapeComponent               =   ?
+//   PhysicsThrowableComponent           = 124  *
+//   PixelSceneComponent                 =   ?
+//   PixelSpriteComponent                = 126  *
+//   PlatformShooterPlayerComponent      = 127  *
+//   PlayerCollisionComponent            = 128  *
+//   PlayerStatsComponent                = 129  *
+//   PositionSeedComponent               = 130  *
+//   PotionComponent                     = 131  *
+//   PressurePlateComponent              =   ?
+//   ProjectileComponent                 = 133  *
+//   RotateTowardsComponent              =   ?
+//   SetLightAlphaFromVelocityComponent  =   ?
+//   SetStartVelocityComponent           =   ?
+//   ShotEffectComponent                 =   ?
+//   SimplePhysicsComponent              = 138  *
+//   SineWaveComponent                   =   ?
+//   SpriteAnimatorComponent             = 140  *
+//   SpriteComponent                     = 141  *
+//   SpriteOffsetAnimatorComponent       = 142  *
+//   SpriteParticleEmitterComponent      = 143  *
+//   SpriteStainsComponent               = 144  *
+//   StatusEffectDataComponent           = 145  *
+//   StreamingKeepAliveComponent         = 146  *
+//   TelekinesisComponent                =   ?
+//   TeleportComponent                   =   ?
+//   TeleportProjectileComponent         =   ?
+//   TextLogComponent                    =   ?
+//   TorchComponent                      = 151  *
+//   UIIconComponent                     =   ?
+//   UIInfoComponent                     = 153  *
+//   VariableStorageComponent            = 154  *
+//   VegetationComponent                 =   ?
+//   VelocityComponent                   = 155  *
+//   VerletPhysicsComponent              = 156  *
+//   VerletWeaponComponent               =   ?
+//   VerletWorldJointComponent           = 158  *
+//   WalletComponent                     = 159  *
+//   WalletValuableComponent             =   ?
+//   WorldStateComponent                 = 161  *
+//   WormAIComponent                     =   ?
+//   WormAttractorComponent              =   ?
+//   WormComponent                       =   ?
+//   WormPlayerComponent                 =   ?
 
 // =============================================================================
 // Placement templates — uncomment ONE section matching your data source.
