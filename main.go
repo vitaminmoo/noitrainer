@@ -286,46 +286,66 @@ func (m model) viewWands() string {
 		return dimStyle.Render("No inventory items found")
 	}
 
-	var sections []string
-
-	// Wands
-	for i, item := range m.state.Wands {
-		w := item.Ability
-		var rows []string
-		name := item.Name(m.reader.Ctx)
-		if name == "" {
-			name = fmt.Sprintf("Wand %d", i+1)
-		}
-
-		gc := w.GunConfig
-		rows = append(rows, row("Spells/Cast", fmt.Sprintf("%d", gc.ActionsPerRound)))
-		rows = append(rows, row("Deck Capacity", fmt.Sprintf("%d", gc.DeckCapacity)))
-		rows = append(rows, row("Shuffle", boolStr(gc.ShuffleDeckWhenEmpty)))
-		rows = append(rows, row("Mana", manaStyle.Render(fmt.Sprintf("%.0f / %.0f", w.Mana, w.ManaMax))))
-		rows = append(rows, row("Mana Regen", fmt.Sprintf("%.0f/s", w.ManaChargeSpeed*60)))
-		rows = append(rows, row("Reload Time", fmt.Sprintf("%.2fs (%d frames)", float64(gc.ReloadTime)/60.0, gc.ReloadTime)))
-
-		if w.ReloadFramesLeft > 0 {
-			rows = append(rows, row("Reloading", fmt.Sprintf("%d frames left", w.ReloadFramesLeft)))
-		}
-
-		sections = append(sections, renderSection(name, rows))
+	const numSlots = 4
+	wandLabelStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8BE9FD")).
+		Width(15)
+	wrow := func(label, value string) string {
+		return wandLabelStyle.Render(label) + valueStyle.Render(value)
 	}
 
-	// Items (potions, powder pouches, etc.)
-	for _, item := range m.state.Items {
-		var rows []string
-		for _, mat := range item.Contents {
-			rows = append(rows, row(mat.Name, fmt.Sprintf("%.0f cells", mat.Amount)))
+	// Build wand sections
+	var wandCols []string
+	for i := 0; i < numSlots; i++ {
+		if i < len(m.state.Wands) {
+			item := m.state.Wands[i]
+			w := item.Ability
+			name := item.Name(m.reader.Ctx)
+			if name == "" {
+				name = fmt.Sprintf("Wand %d", i+1)
+			}
+			gc := w.GunConfig
+			rows := []string{
+				wrow("Spells/Cast", fmt.Sprintf("%d", gc.ActionsPerRound)),
+				wrow("Deck Capacity", fmt.Sprintf("%d", gc.DeckCapacity)),
+				wrow("Shuffle", boolStr(gc.ShuffleDeckWhenEmpty)),
+				wrow("Mana", manaStyle.Render(fmt.Sprintf("%.0f / %.0f", w.Mana, w.ManaMax))),
+				wrow("Mana Regen", fmt.Sprintf("%.0f/s", w.ManaChargeSpeed*60)),
+				wrow("Reload Time", fmt.Sprintf("%.2fs (%df)", float64(gc.ReloadTime)/60.0, gc.ReloadTime)),
+				wrow("Reloading", fmt.Sprintf("%d frames", w.ReloadFramesLeft)),
+			}
+			wandCols = append(wandCols, renderSection(name, rows))
+		} else {
+			wandCols = append(wandCols, renderSection(fmt.Sprintf("Wand %d", i+1), []string{dimStyle.Render("empty")}))
 		}
-		if len(rows) == 0 {
-			rows = append(rows, dimStyle.Render("empty"))
-		}
-		name := item.Name(m.reader.Ctx)
-		sections = append(sections, renderSection(name, rows))
 	}
+	wandCols = equalizeBoxes(wandCols)
 
-	return strings.Join(sections, "")
+	// Build item sections
+	var itemCols []string
+	for i := 0; i < numSlots; i++ {
+		if i < len(m.state.Items) {
+			item := m.state.Items[i]
+			var rows []string
+			for _, mat := range item.Contents {
+				rows = append(rows, wrow(mat.Name, fmt.Sprintf("%.0f cells", mat.Amount)))
+			}
+			if len(rows) == 0 {
+				rows = append(rows, dimStyle.Render("empty"))
+			}
+			name := item.Name(m.reader.Ctx)
+			itemCols = append(itemCols, renderSection(name, rows))
+		} else {
+			itemCols = append(itemCols, renderSection(fmt.Sprintf("Item %d", i+1), []string{dimStyle.Render("empty")}))
+		}
+	}
+	itemCols = equalizeBoxes(itemCols)
+
+	var result []string
+	result = append(result, lipgloss.JoinHorizontal(lipgloss.Top, wandCols...))
+	result = append(result, lipgloss.JoinHorizontal(lipgloss.Top, itemCols...))
+
+	return strings.Join(result, "\n")
 }
 
 func (m model) viewWorld() string {
@@ -400,6 +420,23 @@ func row(label, value string) string {
 func renderSection(title string, rows []string) string {
 	content := sectionTitleStyle.Render(title) + "\n" + strings.Join(rows, "\n")
 	return sectionStyle.Render(content) + "\n"
+}
+
+// equalizeBoxes makes all rendered boxes the same width and height.
+func equalizeBoxes(boxes []string) []string {
+	maxW, maxH := 0, 0
+	for _, b := range boxes {
+		if w := lipgloss.Width(b); w > maxW {
+			maxW = w
+		}
+		if h := lipgloss.Height(b); h > maxH {
+			maxH = h
+		}
+	}
+	for i, b := range boxes {
+		boxes[i] = lipgloss.Place(maxW, maxH, lipgloss.Left, lipgloss.Top, b)
+	}
+	return boxes
 }
 
 func boolStr(b bool) string {
