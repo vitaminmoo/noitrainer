@@ -259,6 +259,34 @@ func (r *Reader) readEM() *EntityManager {
 	return em
 }
 
+// CameraState holds just the camera position and view dimensions.
+type CameraState struct {
+	CameraX, CameraY float32
+	ViewW, ViewH     float32
+}
+
+// ReadCamera reads only the camera position and view rect (lightweight).
+func (r *Reader) ReadCamera() *CameraState {
+	globalsPtr, err := r.readU32(AddrGameGlobals)
+	if err != nil || globalsPtr == 0 {
+		return nil
+	}
+	globals, _ := ReadGameGlobals(r.Ctx, uintptr(globalsPtr))
+	if globals == nil || globals.PWorldManager == 0 {
+		return nil
+	}
+	vr, _ := ReadWorldManagerViewRect(r.Ctx, uintptr(globals.PWorldManager))
+	if vr == nil {
+		return nil
+	}
+	return &CameraState{
+		CameraX: vr.ViewX + vr.ViewWidth*0.5,
+		CameraY: vr.ViewY + vr.ViewHeight*0.5,
+		ViewW:   vr.ViewWidth,
+		ViewH:   vr.ViewHeight,
+	}
+}
+
 // ReadState reads a complete game state snapshot.
 func (r *Reader) ReadState() *GameState {
 	gs := &GameState{Connected: true}

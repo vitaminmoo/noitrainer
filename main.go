@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"sort"
@@ -15,6 +18,41 @@ import (
 	"github.com/vitaminmoo/memtools/process"
 	"noitrainer/noita"
 )
+
+// ringLog is a thread-safe ring buffer that implements io.Writer for log output.
+type ringLog struct {
+	mu    sync.Mutex
+	lines []string
+	max   int
+}
+
+func newRingLog(max int) *ringLog {
+	return &ringLog{max: max}
+}
+
+func (r *ringLog) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Split on newlines, append non-empty lines.
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		r.lines = append(r.lines, line)
+		if len(r.lines) > r.max {
+			r.lines = r.lines[len(r.lines)-r.max:]
+		}
+	}
+	return len(p), nil
+}
+
+func (r *ringLog) Lines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
+}
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -303,6 +341,9 @@ type model struct {
 	entityDetails *noita.EntityDetails
 	listReady     bool
 	categoryCounts map[entityCategory]int
+	overlay       *overlayScene
+	overlayCancel context.CancelFunc
+	logBuf        *ringLog
 }
 
 func newEntityList() list.Model {
@@ -323,12 +364,17 @@ func newEntityList() list.Model {
 	return l
 }
 
-func initialModel() model {
+func initialModel(logBuf *ringLog) model {
+	ctx, cancel := context.WithCancel(context.Background())
+	ov := startOverlay(ctx)
 	return model{
 		state:          &noita.GameState{},
-		tabs:           []string{"Player", "Entities", "Wands", "World"},
+		tabs:           []string{"Player", "Entities", "Wands", "World", "Log"},
 		entityList:     newEntityList(),
 		categoryCounts: make(map[entityCategory]int),
+		overlay:        ov,
+		overlayCancel:  cancel,
+		logBuf:         logBuf,
 	}
 }
 
@@ -352,6 +398,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("q", "ctrl+c"))):
 			m.quitting = true
+			if m.overlayCancel != nil {
+				m.overlayCancel()
+			}
 			return m, tea.Quit
 		case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
 			m.tab = (m.tab + 1) % len(m.tabs)
@@ -384,6 +433,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = m.reader.ReadState()
 			m.updateEntityList()
 			m.updateEntityDetails()
+			m.updateOverlay()
 		}
 		return m, tickCmd()
 	}
@@ -466,6 +516,22 @@ func (m *model) updateEntityDetails() {
 	m.entityDetails = m.reader.ReadEntityDetails(sel.summary.Ptr)
 }
 
+func (m *model) updateOverlay() {
+	if m.overlay == nil {
+		return
+	}
+	// Give the overlay its own Process handle for the same PID (not thread-safe to share).
+	if m.proc != nil {
+		m.overlay.proc.CompareAndSwap(nil, process.New(m.proc.PID))
+	}
+	// Tell the overlay which entity is selected.
+	sel := &overlaySelection{}
+	if s, ok := m.entityList.SelectedItem().(entityItem); ok {
+		sel.EntityPtr = s.summary.Ptr
+	}
+	m.overlay.selection.Store(sel)
+}
+
 func (m *model) tryConnect() {
 	if m.proc != nil {
 		return
@@ -524,6 +590,8 @@ func (m model) View() string {
 		b.WriteString(m.viewWands())
 	case 3:
 		b.WriteString(m.viewWorld())
+	case 4:
+		b.WriteString(m.viewLog())
 	}
 
 	b.WriteString("\n" + dimStyle.Render("tab/shift+tab: switch tabs  /: filter  q: quit"))
@@ -817,6 +885,20 @@ func (m model) viewWorld() string {
 	return strings.Join(sections, "")
 }
 
+// ── Log tab ───────────────────────────────────────────────────────
+
+func (m model) viewLog() string {
+	lines := m.logBuf.Lines()
+	if len(lines) == 0 {
+		return dimStyle.Render("(no log messages)")
+	}
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(dimStyle.Render(l) + "\n")
+	}
+	return b.String()
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 func row(label, value string) string {
@@ -881,7 +963,11 @@ func dmgMultsNonDefault(d *noita.DamageModelComponent) []string {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	logBuf := newRingLog(20)
+	log.SetOutput(logBuf)
+	log.SetFlags(log.Ltime)
+
+	p := tea.NewProgram(initialModel(logBuf), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
