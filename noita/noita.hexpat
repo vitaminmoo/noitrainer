@@ -24,7 +24,7 @@ struct MsvcString {
 } [[static, format("format_msvc_string")]];
 
 fn format_msvc_string(MsvcString s) {
-    if (s.length == 0) return "\"\"";
+    if (s.length == 0) return "";
     if (s.capacity <= 15) {
         str result = "";
         for (u32 i = 0, i < s.length, i = i + 1) {
@@ -32,7 +32,9 @@ fn format_msvc_string(MsvcString s) {
         }
         return result;
     }
-    return std::format("<heap len={}>", s.length);
+    u32 heap_ptr = s.data[0] | (s.data[1] << 8) | (s.data[2] << 16) | (s.data[3] << 24);
+    if (heap_ptr == 0) return "";
+    return std::mem::read_string(heap_ptr, s.length);
 };
 
 // MSVC std::vector<T> header (12 bytes) — opaque, for vectors we don't index into
@@ -106,8 +108,8 @@ struct Entity {
     float scale_y;
 
     // +0x90
-    u32 children_ptr            [[comment("ChildrenContainer* (Entity** array), or NULL")]];
-    u32 parent_entity_ptr       [[comment("Entity* parent, or NULL")]];
+    ChildrenContainer *children_ptr : u32 [[comment("ChildrenContainer* (Entity** array), or NULL")]];
+    Entity *parent_entity_ptr : u32      [[comment("Entity* parent, or NULL")]];
 } [[color("4488FF"), static]];
 
 fn format_alive(s32 v) {
@@ -450,10 +452,10 @@ struct GameGlobals {
     float game_time             [[comment("Game time in seconds")]];
 
     // +0x0C: Manager pointers
-    u32 p_world_manager         [[color("88FFAA"), comment("WorldManager*, 726 xrefs")]];
+    WorldManagerViewRect *p_world_manager : u32 [[color("88FFAA"), comment("WorldManager*, 726 xrefs")]];
     u32 p_chunk_system          [[color("88FFAA")]];
     u32 p_cell_grid             [[color("88FFAA")]];
-    u32 p_cell_factory          [[color("88FFAA")]];
+    CellFactory *p_cell_factory : u32 [[color("88FFAA")]];
     u32 unknown_1c;
     u32 p_physics_world         [[color("88FFAA")]];
     u32 p_audio_manager         [[color("88FFAA")]];

@@ -10,18 +10,6 @@ import (
 	"github.com/vitaminmoo/memtools/hexpat/runtime"
 )
 
-// Known static addresses in noita.exe (stable across runs).
-const (
-	AddrWorldSeed      = 0x01205004
-	AddrDeathCount     = 0x01208AF8
-	AddrNumOrbsTotal   = 0x01152544
-	AddrEntityManager  = 0x01204B98
-	AddrDeathMatchApp  = 0x01204BC0
-	AddrGameGlobals    = 0x0122374C
-	AddrWorldState     = 0x01205010
-	AddrOrbPersistence = 0x01207404
-)
-
 // CellData stride in the CellFactory material array.
 const cellDataStride = 0x290
 
@@ -109,38 +97,13 @@ func (item *InventoryItem) IsWand() bool {
 
 // Name returns a display name.
 func (item *InventoryItem) Name(ctx *runtime.ReadContext) string {
-	name := MsvcStringValue(&item.Ability.UiName, ctx)
+	name := item.Ability.UiName.FormatMsvcString(ctx)
 	if name == "" {
-		name = MsvcStringValue(&item.Ability.SpriteFile, ctx)
+		name = item.Ability.SpriteFile.FormatMsvcString(ctx)
 	}
 	return name
 }
 
-func MsvcStringValue(s *MsvcString, ctx *runtime.ReadContext) string {
-	if s.Length == 0 {
-		return ""
-	}
-	if s.Capacity <= 15 {
-		n := s.Length
-		if n > 16 {
-			n = 16
-		}
-		return string(s.Data[:n])
-	}
-	heapPtr := binary.LittleEndian.Uint32(s.Data[:4])
-	if heapPtr == 0 {
-		return "<null>"
-	}
-	n := s.Length
-	if n > 4096 {
-		n = 4096
-	}
-	buf := make([]byte, n)
-	if _, err := ctx.ReadAt(buf, int64(heapPtr)); err != nil {
-		return fmt.Sprintf("<heap@0x%08X len=%d err=%v>", heapPtr, s.Length, err)
-	}
-	return string(buf)
-}
 
 // Reader reads Noita game state from process memory.
 type Reader struct {
@@ -170,11 +133,7 @@ func (r *Reader) readS32(addr int64) (int32, error) {
 
 // readEM reads the EntityManager via its static pointer.
 func (r *Reader) readEM() *EntityManager {
-	emPtr, err := r.readU32(AddrEntityManager)
-	if err != nil || emPtr == 0 {
-		return nil
-	}
-	em, _ := ReadEntityManager(r.Ctx, uintptr(emPtr))
+	em, _ := ReadGEntityManager(r.Ctx)
 	return em
 }
 
@@ -186,15 +145,11 @@ type CameraState struct {
 
 // ReadCamera reads only the camera position and view rect (lightweight).
 func (r *Reader) ReadCamera() *CameraState {
-	globalsPtr, err := r.readU32(AddrGameGlobals)
-	if err != nil || globalsPtr == 0 {
+	globals, _ := ReadGGameGlobals(r.Ctx)
+	if globals == nil {
 		return nil
 	}
-	globals, _ := ReadGameGlobals(r.Ctx, uintptr(globalsPtr))
-	if globals == nil || globals.PWorldManager == 0 {
-		return nil
-	}
-	vr, _ := ReadWorldManagerViewRect(r.Ctx, uintptr(globals.PWorldManager))
+	vr, _ := globals.ReadPWorldManager(r.Ctx)
 	if vr == nil {
 		return nil
 	}
@@ -211,7 +166,7 @@ func (r *Reader) ReadState() *GameState {
 	gs := &GameState{Connected: true}
 
 	// Read static globals
-	if v, err := r.readU32(AddrWorldSeed); err == nil {
+	if v, err := ReadGWorldSeed(r.Ctx); err == nil {
 		gs.WorldSeed = v
 	} else {
 		gs.Error = fmt.Sprintf("read world seed: %v", err)
@@ -219,35 +174,26 @@ func (r *Reader) ReadState() *GameState {
 		return gs
 	}
 
-	gs.DeathCount, _ = r.readS32(AddrDeathCount)
-	gs.NumOrbsTotal, _ = r.readS32(AddrNumOrbsTotal)
+	gs.DeathCount, _ = ReadGDeathCount(r.Ctx)
+	gs.NumOrbsTotal, _ = ReadGNumOrbsTotal(r.Ctx)
 
 	// Read GameGlobals (pointer indirection)
-	if globalsPtr, err := r.readU32(AddrGameGlobals); err == nil && globalsPtr != 0 {
-		gs.Globals, _ = ReadGameGlobals(r.Ctx, uintptr(globalsPtr))
-
+	gs.Globals, _ = ReadGGameGlobals(r.Ctx)
+	if gs.Globals != nil {
 		// Read camera from WorldManager view rect
-		if gs.Globals != nil && gs.Globals.PWorldManager != 0 {
-			if vr, _ := ReadWorldManagerViewRect(r.Ctx, uintptr(gs.Globals.PWorldManager)); vr != nil {
-				gs.ViewW = vr.ViewWidth
-				gs.ViewH = vr.ViewHeight
-				gs.CameraX = vr.ViewX + vr.ViewWidth*0.5
-				gs.CameraY = vr.ViewY + vr.ViewHeight*0.5
-			}
+		if vr, _ := gs.Globals.ReadPWorldManager(r.Ctx); vr != nil {
+			gs.ViewW = vr.ViewWidth
+			gs.ViewH = vr.ViewHeight
+			gs.CameraX = vr.ViewX + vr.ViewWidth*0.5
+			gs.CameraY = vr.ViewY + vr.ViewHeight*0.5
 		}
 	}
 
 	// Read WorldStateComponent (pointer indirection)
-	if wsPtr, err := r.readU32(AddrWorldState); err == nil && wsPtr != 0 {
-		gs.WorldState, _ = ReadWorldStateComponent(r.Ctx, uintptr(wsPtr))
-	}
+	gs.WorldState, _ = ReadGWorldState(r.Ctx)
 
 	// Find player entity via DeathMatchApp -> player_entities vector
-	dmaPtr, err := r.readU32(AddrDeathMatchApp)
-	if err != nil || dmaPtr == 0 {
-		return gs
-	}
-	dma, _ := ReadDeathMatchApp(r.Ctx, uintptr(dmaPtr))
+	dma, _ := ReadGDeathMatchApp(r.Ctx)
 	if dma == nil || len(dma.PlayerEntities.Elements) == 0 {
 		return gs
 	}
@@ -291,15 +237,11 @@ func (r *Reader) ReadState() *GameState {
 
 // readMaterialName reads the material name for a given material ID from CellFactory.
 func (r *Reader) readMaterialName(matID int) string {
-	globalsPtr, err := r.readU32(AddrGameGlobals)
-	if err != nil || globalsPtr == 0 {
+	globals, _ := ReadGGameGlobals(r.Ctx)
+	if globals == nil {
 		return fmt.Sprintf("mat_%d", matID)
 	}
-	globals, _ := ReadGameGlobals(r.Ctx, uintptr(globalsPtr))
-	if globals == nil || globals.PCellFactory == 0 {
-		return fmt.Sprintf("mat_%d", matID)
-	}
-	cf, _ := ReadCellFactory(r.Ctx, uintptr(globals.PCellFactory))
+	cf, _ := globals.ReadPCellFactory(r.Ctx)
 	if cf == nil || cf.CellDataArrayPtr == 0 {
 		return fmt.Sprintf("mat_%d", matID)
 	}
@@ -308,7 +250,7 @@ func (r *Reader) readMaterialName(matID int) string {
 	if cd == nil {
 		return fmt.Sprintf("mat_%d", matID)
 	}
-	name := MsvcStringValue(&cd.Name, r.Ctx)
+	name := cd.Name.FormatMsvcString(r.Ctx)
 	if name == "" {
 		return fmt.Sprintf("mat_%d", matID)
 	}
@@ -390,11 +332,8 @@ func (r *Reader) hasComponent(em *EntityManager, slotIndex int32, typeID TypeID)
 }
 
 // readChildEntityPtrs reads the Entity* pointers from a ChildrenContainer.
-func (r *Reader) readChildEntityPtrs(childrenPtr uint32) []uint32 {
-	if childrenPtr == 0 {
-		return nil
-	}
-	cc, _ := ReadChildrenContainer(r.Ctx, uintptr(childrenPtr))
+func (r *Reader) readChildEntityPtrs(entity *Entity) []uint32 {
+	cc, _ := entity.ReadChildrenPtr(r.Ctx)
 	if cc == nil || len(cc.Children) == 0 {
 		return nil
 	}
@@ -412,7 +351,7 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 
 	var items []*InventoryItem
 
-	childPtrs := r.readChildEntityPtrs(player.ChildrenPtr)
+	childPtrs := r.readChildEntityPtrs(player)
 	for _, cp := range childPtrs {
 		if cp == 0 {
 			continue
@@ -430,7 +369,7 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 			items = append(items, item)
 		}
 
-		grandchildPtrs := r.readChildEntityPtrs(child.ChildrenPtr)
+		grandchildPtrs := r.readChildEntityPtrs(child)
 		for _, gcp := range grandchildPtrs {
 			if gcp == 0 {
 				continue
@@ -499,7 +438,7 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 			entity.Name = *nameStr
 		}
 
-		name := MsvcStringValue(&entity.Name, r.Ctx)
+		name := entity.Name.FormatMsvcString(r.Ctx)
 		compIDs := r.FindEntityComponentIDs(em, slotIndex)
 		summary := &EntitySummary{
 			Entity:       entity,
@@ -533,7 +472,7 @@ func (r *Reader) ReadEntityDetails(entityPtr uint32) *EntityDetails {
 
 	details := &EntityDetails{
 		Entity:  e,
-		Name:    MsvcStringValue(&e.Name, r.Ctx),
+		Name:    e.Name.FormatMsvcString(r.Ctx),
 		HP:      readComponent[DamageModelComponent](r, em, e.SlotIndex, TypeIDDamageModelComponent, ReadDamageModelComponent),
 		Wallet:  readComponent[WalletComponent](r, em, e.SlotIndex, TypeIDWalletComponent, ReadWalletComponent),
 		Char:    readComponent[CharacterDataComponent](r, em, e.SlotIndex, TypeIDCharacterDataComponent, ReadCharacterDataComponent),
@@ -542,7 +481,7 @@ func (r *Reader) ReadEntityDetails(entityPtr uint32) *EntityDetails {
 	}
 
 	// Read children
-	childPtrs := r.readChildEntityPtrs(e.ChildrenPtr)
+	childPtrs := r.readChildEntityPtrs(e)
 	for _, cp := range childPtrs {
 		if cp == 0 {
 			continue
@@ -553,7 +492,7 @@ func (r *Reader) ReadEntityDetails(entityPtr uint32) *EntityDetails {
 		}
 		details.Children = append(details.Children, &EntitySummary{
 			Entity: child,
-			Name:   MsvcStringValue(&child.Name, r.Ctx),
+			Name:   child.Name.FormatMsvcString(r.Ctx),
 			Ptr:    cp,
 		})
 	}
@@ -604,7 +543,7 @@ func (r *Reader) ReadComponentBuffers() []*ComponentBufferInfo {
 		nameMs, _ := cbr.NameString().Read()
 		var name string
 		if nameMs != nil {
-			name = MsvcStringValue(nameMs, r.Ctx)
+			name = nameMs.FormatMsvcString(r.Ctx)
 		}
 		// If NameString is empty, resolve via PTypeName from an active component
 		if name == "" && activeCount > 0 {
@@ -642,12 +581,8 @@ func (r *Reader) ReadComponentBuffers() []*ComponentBufferInfo {
 
 // ReadEntityManagerPtr returns the entity manager. Exported for CLI tools.
 func (r *Reader) ReadEntityManagerPtr() (*EntityManager, uint32) {
-	emPtr, err := r.readU32(AddrEntityManager)
-	if err != nil || emPtr == 0 {
-		return nil, 0
-	}
-	em, _ := ReadEntityManager(r.Ctx, uintptr(emPtr))
-	return em, emPtr
+	em, _ := ReadGEntityManager(r.Ctx)
+	return em, AddrGEntityManager
 }
 
 // FindEntityComponentIDs returns all component type IDs that an entity has.

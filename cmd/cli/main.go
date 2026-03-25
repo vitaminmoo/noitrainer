@@ -303,9 +303,9 @@ func cmdEntity(id int32) {
 	if details.Ability != nil {
 		a := details.Ability
 		fmt.Printf("\n  AbilityComponent:\n")
-		fmt.Printf("    UiName:     %s\n", noita.MsvcStringValue(&a.UiName, reader.Ctx))
-		fmt.Printf("    EntityFile: %s\n", noita.MsvcStringValue(&a.EntityFile, reader.Ctx))
-		fmt.Printf("    SpriteFile: %s\n", noita.MsvcStringValue(&a.SpriteFile, reader.Ctx))
+		fmt.Printf("    UiName:     %s\n", a.UiName.FormatMsvcString(reader.Ctx))
+		fmt.Printf("    EntityFile: %s\n", a.EntityFile.FormatMsvcString(reader.Ctx))
+		fmt.Printf("    SpriteFile: %s\n", a.SpriteFile.FormatMsvcString(reader.Ctx))
 		fmt.Printf("    Mana:       %.0f / %.0f (regen %.0f/s)\n", a.Mana, a.ManaMax, a.ManaChargeSpeed*60)
 		fmt.Printf("    UseGun:     %v\n", a.UseGunScript)
 		gc := a.GunConfig
@@ -370,7 +370,7 @@ func cmdTree(id int32) {
 		if parent == nil {
 			break
 		}
-		parentName := noita.MsvcStringValue(&parent.Name, reader.Ctx)
+		parentName := parent.Name.FormatMsvcString(reader.Ctx)
 		parentSummary := &noita.EntitySummary{
 			Entity: parent,
 			Name:   parentName,
@@ -705,7 +705,7 @@ func flattenStruct(m map[string]string, prefix string, v any, reader *noita.Read
 		case reflect.Struct:
 			if field.Type == reflect.TypeOf(noita.MsvcString{}) {
 				ms := fv.Addr().Interface().(*noita.MsvcString)
-				m[key] = fmt.Sprintf("%q", noita.MsvcStringValue(ms, reader.Ctx))
+				m[key] = fmt.Sprintf("%q", ms.FormatMsvcString(reader.Ctx))
 			} else if field.Type == reflect.TypeOf(noita.ComponentHeader{}) {
 				hdr := fv.Interface().(noita.ComponentHeader)
 				m[key+".TypeId"] = fmt.Sprintf("%d", hdr.TypeId)
