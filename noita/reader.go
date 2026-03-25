@@ -427,14 +427,16 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 		entityId, _ := er.EntityId()
 		posX, _ := er.PosX()
 		posY, _ := er.PosY()
+		parentPtr, _ := er.ParentEntityPtr()
 		nameStr, _ := er.Name().Read()
 
 		// Build a minimal Entity for the summary (avoids full eager read)
 		entity := &Entity{
-			EntityId:  entityId,
-			SlotIndex: slotIndex,
-			PosX:      posX,
-			PosY:      posY,
+			EntityId:        entityId,
+			SlotIndex:       slotIndex,
+			PosX:            posX,
+			PosY:            posY,
+			ParentEntityPtr: parentPtr,
 		}
 		if nameStr != nil {
 			entity.Name = *nameStr

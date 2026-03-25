@@ -188,8 +188,9 @@ func hexToRGBA(hex string) color.RGBA {
 type overlayOption int
 
 const (
-	optHideAtOrigin overlayOption = iota
+	optHideAtOrigin    overlayOption = iota
 	optHideAtPlayer
+	optHideInventory
 	optShowEntityIDs
 	optShowLabels
 	optionCount // sentinel
@@ -201,6 +202,8 @@ func (o overlayOption) String() string {
 		return "Hide entities at (0, 0)"
 	case optHideAtPlayer:
 		return "Hide entities at player pos"
+	case optHideInventory:
+		return "Hide player inventory items"
 	case optShowEntityIDs:
 		return "Show entity IDs"
 	case optShowLabels:
@@ -508,9 +511,10 @@ func initialModel(logBuf *ringLog) model {
 			catEnemy: true,
 		},
 		overlayOpts: map[overlayOption]bool{
-			optHideAtOrigin: true,
-			optHideAtPlayer: true,
-			optShowLabels:   true,
+			optHideAtOrigin:  true,
+			optHideAtPlayer:  true,
+			optHideInventory: true,
+			optShowLabels:    true,
 		},
 	}
 }
@@ -705,9 +709,45 @@ func (m *model) updateOverlay() {
 			playerY = pe.PosY
 		}
 
+		// Build set of entity pointers that are in the player's inventory tree.
+		var inventoryPtrs map[uint32]bool
+		if m.overlayOpts[optHideInventory] && m.state.PlayerEntity != nil {
+			// Find the player entity pointer from the summary list.
+			var playerPtr uint32
+			playerID := m.state.PlayerEntity.EntityId
+			byPtr := make(map[uint32]*noita.EntitySummary, len(m.state.Entities))
+			for _, e := range m.state.Entities {
+				byPtr[e.Ptr] = e
+				if e.Entity.EntityId == playerID {
+					playerPtr = e.Ptr
+				}
+			}
+			if playerPtr != 0 {
+				inventoryPtrs = make(map[uint32]bool)
+				for _, e := range m.state.Entities {
+					// Walk parent chain to see if it reaches the player.
+					ptr := e.Entity.ParentEntityPtr
+					for depth := 0; ptr != 0 && depth < 10; depth++ {
+						if ptr == playerPtr {
+							inventoryPtrs[e.Ptr] = true
+							break
+						}
+						if p, ok := byPtr[ptr]; ok {
+							ptr = p.Entity.ParentEntityPtr
+						} else {
+							break
+						}
+					}
+				}
+			}
+		}
+
 		for _, e := range m.state.Entities {
 			cat := categorize(e)
 			if !m.overlayCats[cat] {
+				continue
+			}
+			if inventoryPtrs[e.Ptr] {
 				continue
 			}
 			x, y := e.Entity.PosX, e.Entity.PosY
