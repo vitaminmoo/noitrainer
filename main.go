@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -173,6 +175,43 @@ func (c entityCategory) color() string {
 	}
 }
 
+func hexToRGBA(hex string) color.RGBA {
+	hex = strings.TrimPrefix(hex, "#")
+	r, _ := strconv.ParseUint(hex[0:2], 16, 8)
+	g, _ := strconv.ParseUint(hex[2:4], 16, 8)
+	b, _ := strconv.ParseUint(hex[4:6], 16, 8)
+	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255}
+}
+
+// overlayOption is a toggleable overlay setting.
+type overlayOption int
+
+const (
+	optHideAtOrigin overlayOption = iota
+	optHideAtPlayer
+	optShowEntityIDs
+	optShowLabels
+	optionCount // sentinel
+)
+
+func (o overlayOption) String() string {
+	switch o {
+	case optHideAtOrigin:
+		return "Hide entities at (0, 0)"
+	case optHideAtPlayer:
+		return "Hide entities at player pos"
+	case optShowEntityIDs:
+		return "Show entity IDs"
+	case optShowLabels:
+		return "Show text labels"
+	default:
+		return "?"
+	}
+}
+
+// overlayCategories lists the categories available for overlay toggle (excludes Player).
+var overlayCategories = []entityCategory{catEnemy, catItem, catTorch, catProp, catEffect, catOther}
+
 func categorize(e *noita.EntitySummary) entityCategory {
 	has := make(map[noita.TypeID]bool)
 	for _, id := range e.ComponentIDs {
@@ -282,7 +321,8 @@ func subcategorize(e *noita.EntitySummary) string {
 func entityDisplayName(e *noita.EntitySummary) string {
 	name := e.Name
 	if name == "" || name == "unknown" {
-		return fmt.Sprintf("#%d", e.Entity.EntityId)
+		// Fall back to subcategory as display name.
+		return subcategorize(e)
 	}
 	if strings.HasPrefix(name, "$animal_") {
 		return strings.TrimPrefix(name, "$animal_")
@@ -344,6 +384,11 @@ type model struct {
 	overlay       *overlayScene
 	overlayCancel context.CancelFunc
 	logBuf        *ringLog
+
+	// Overlay tab state
+	overlayCats    map[entityCategory]bool // which categories to render
+	overlayOpts    map[overlayOption]bool  // option toggles
+	overlayCursor  int                     // cursor position in overlay tab
 }
 
 func newEntityList() list.Model {
@@ -369,12 +414,20 @@ func initialModel(logBuf *ringLog) model {
 	ov := startOverlay(ctx)
 	return model{
 		state:          &noita.GameState{},
-		tabs:           []string{"Player", "Entities", "Wands", "World", "Log"},
+		tabs:           []string{"Player", "Entities", "Wands", "World", "Overlay", "Log"},
 		entityList:     newEntityList(),
 		categoryCounts: make(map[entityCategory]int),
 		overlay:        ov,
 		overlayCancel:  cancel,
 		logBuf:         logBuf,
+		overlayCats: map[entityCategory]bool{
+			catEnemy: true,
+		},
+		overlayOpts: map[overlayOption]bool{
+			optHideAtOrigin: true,
+			optHideAtPlayer: true,
+			optShowLabels:   true,
+		},
 	}
 }
 
@@ -411,6 +464,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmd tea.Cmd
 				m.entityList, cmd = m.entityList.Update(msg)
 				return m, cmd
+			}
+			if m.tab == 4 { // Overlay tab
+				switch msg.String() {
+				case "up", "k":
+					if m.overlayCursor > 0 {
+						m.overlayCursor--
+					}
+				case "down", "j":
+					total := len(overlayCategories) + int(optionCount)
+					if m.overlayCursor < total-1 {
+						m.overlayCursor++
+					}
+				case " ", "enter":
+					catCount := len(overlayCategories)
+					if m.overlayCursor < catCount {
+						cat := overlayCategories[m.overlayCursor]
+						m.overlayCats[cat] = !m.overlayCats[cat]
+					} else {
+						opt := overlayOption(m.overlayCursor - catCount)
+						m.overlayOpts[opt] = !m.overlayOpts[opt]
+					}
+				}
 			}
 		}
 
@@ -530,6 +605,52 @@ func (m *model) updateOverlay() {
 		sel.EntityPtr = s.summary.Ptr
 	}
 	m.overlay.selection.Store(sel)
+
+	// Build filtered entity list for overlay rendering.
+	var ents []overlayEntity
+	if m.state != nil {
+		var playerX, playerY float32
+		if pe := m.state.PlayerEntity; pe != nil {
+			playerX = pe.PosX
+			playerY = pe.PosY
+		}
+
+		for _, e := range m.state.Entities {
+			cat := categorize(e)
+			if !m.overlayCats[cat] {
+				continue
+			}
+			x, y := e.Entity.PosX, e.Entity.PosY
+
+			if m.overlayOpts[optHideAtOrigin] && x == 0 && y == 0 {
+				continue
+			}
+			if m.overlayOpts[optHideAtPlayer] && x == playerX && y == playerY {
+				continue
+			}
+
+			name := ""
+			if m.overlayOpts[optShowLabels] {
+				name = entityDisplayName(e)
+			}
+			if m.overlayOpts[optShowEntityIDs] {
+				id := fmt.Sprintf("#%d", e.Entity.EntityId)
+				if name != "" {
+					name = id + " " + name
+				} else {
+					name = id
+				}
+			}
+
+			ents = append(ents, overlayEntity{
+				X:     x,
+				Y:     y,
+				Name:  name,
+				Color: hexToRGBA(cat.color()),
+			})
+		}
+	}
+	m.overlay.entities.Store(&ents)
 }
 
 func (m *model) tryConnect() {
@@ -591,6 +712,8 @@ func (m model) View() string {
 	case 3:
 		b.WriteString(m.viewWorld())
 	case 4:
+		b.WriteString(m.viewOverlay())
+	case 5:
 		b.WriteString(m.viewLog())
 	}
 
@@ -883,6 +1006,64 @@ func (m model) viewWorld() string {
 	}
 
 	return strings.Join(sections, "")
+}
+
+// ── Overlay tab ────────────────────────────────────────────────────
+
+func (m model) viewOverlay() string {
+	checkOn := lipgloss.NewStyle().Foreground(lipgloss.Color("#50FA7B")).Render("[x]")
+	checkOff := dimStyle.Render("[ ]")
+	cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Render(">")
+	noCursor := "  "
+
+	var rows []string
+	idx := 0
+
+	// Categories section
+	rows = append(rows, sectionTitleStyle.Render("Categories")+" "+dimStyle.Render("(space to toggle)"))
+	for _, cat := range overlayCategories {
+		check := checkOff
+		if m.overlayCats[cat] {
+			check = checkOn
+		}
+		prefix := noCursor
+		if m.overlayCursor == idx {
+			prefix = cursor
+		}
+		catStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(cat.color()))
+		n := m.categoryCounts[cat]
+		count := dimStyle.Render(fmt.Sprintf("(%d)", n))
+		rows = append(rows, fmt.Sprintf(" %s %s %s %s", prefix, check, catStyle.Render(cat.String()), count))
+		idx++
+	}
+
+	rows = append(rows, "")
+
+	// Options section
+	rows = append(rows, sectionTitleStyle.Render("Options"))
+	for opt := overlayOption(0); opt < optionCount; opt++ {
+		check := checkOff
+		if m.overlayOpts[opt] {
+			check = checkOn
+		}
+		prefix := noCursor
+		if m.overlayCursor == idx {
+			prefix = cursor
+		}
+		rows = append(rows, fmt.Sprintf(" %s %s %s", prefix, check, opt.String()))
+		idx++
+	}
+
+	// Count of entities being rendered
+	var renderCount int
+	if ents := m.overlay.entities.Load(); ents != nil {
+		renderCount = len(*ents)
+	}
+	rows = append(rows, "")
+	rows = append(rows, dimStyle.Render(fmt.Sprintf("Rendering %d entities on overlay", renderCount)))
+
+	content := strings.Join(rows, "\n")
+	return sectionStyle.Render(content)
 }
 
 // ── Log tab ───────────────────────────────────────────────────────

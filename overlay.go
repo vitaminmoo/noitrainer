@@ -13,6 +13,13 @@ import (
 	"noitrainer/noita"
 )
 
+// overlayEntity is a single entity to render on the overlay.
+type overlayEntity struct {
+	X, Y  float32
+	Name  string
+	Color color.RGBA
+}
+
 // overlayData is the snapshot drawn each frame.
 type overlayData struct {
 	EntityX, EntityY float32 // selected entity world position
@@ -29,6 +36,7 @@ type overlaySelection struct {
 type overlayScene struct {
 	data      atomic.Pointer[overlayData]
 	selection atomic.Pointer[overlaySelection]
+	entities  atomic.Pointer[[]overlayEntity]
 	proc      atomic.Pointer[process.Process]
 	drawCount int
 }
@@ -108,6 +116,23 @@ func (s *overlayScene) Draw(c *overlay.Canvas) {
 	// Map game world coordinates to screen pixels within the window.
 	scaleX := ww / float64(d.ViewW)
 	scaleY := wh / float64(d.ViewH)
+
+	// Draw all tracked entities with labels.
+	if ents := s.entities.Load(); ents != nil {
+		lineH := float64(c.TextLineHeight())
+		for _, e := range *ents {
+			sx := wx + float64(e.X-d.CameraX)*scaleX + ww/2
+			sy := wy + float64(e.Y-d.CameraY)*scaleY + wh/2
+			// Skip if off-screen.
+			if sx < wx-20 || sx > wx+ww+20 || sy < wy-20 || sy > wy+wh+20 {
+				continue
+			}
+			c.Ellipse(sx, sy, 6, 6, e.Color)
+			if e.Name != "" {
+				c.Text(e.Name, sx+8, sy-lineH/2, e.Color)
+			}
+		}
+	}
 
 	// Draw circle around selected entity.
 	if d.HasSelection {
