@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"io"
 	"log"
 	"os"
 	"strconv"
@@ -342,17 +343,15 @@ type entityItem struct {
 }
 
 func (i entityItem) Title() string {
-	catStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(i.category.color()))
-	subStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(i.category.color())).Faint(true)
-	return fmt.Sprintf("%s/%s %s",
-		catStyle.Render(i.category.String()),
-		subStyle.Render(i.subcategory),
-		entityDisplayName(i.summary))
+	return fmt.Sprintf("#%d %s", i.summary.Entity.EntityId, entityDisplayName(i.summary))
 }
 
 func (i entityItem) Description() string {
 	e := i.summary
-	parts := []string{fmt.Sprintf("(%.0f, %.0f)", e.Entity.PosX, e.Entity.PosY)}
+	parts := []string{
+		fmt.Sprintf("%s/%s", i.category.String(), i.subcategory),
+		fmt.Sprintf("(%.0f, %.0f)", e.Entity.PosX, e.Entity.PosY),
+	}
 	if e.HasHP {
 		parts = append(parts, "HP")
 	}
@@ -360,7 +359,7 @@ func (i entityItem) Description() string {
 }
 
 func (i entityItem) FilterValue() string {
-	return i.category.String() + " " + i.subcategory + " " + entityDisplayName(i.summary)
+	return fmt.Sprintf("%d %s %s %s", i.summary.Entity.EntityId, i.category.String(), i.subcategory, entityDisplayName(i.summary))
 }
 
 // ── Model ──────────────────────────────────────────────────────────
@@ -391,17 +390,102 @@ type model struct {
 	overlayCursor  int                     // cursor position in overlay tab
 }
 
+// entityDelegate wraps the default delegate to apply per-item category colors.
+type entityDelegate struct {
+	base list.DefaultDelegate
+}
+
+func (d entityDelegate) Height() int                             { return d.base.Height() }
+func (d entityDelegate) Spacing() int                            { return d.base.Spacing() }
+func (d entityDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return d.base.Update(msg, m) }
+
+func (d entityDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	ei, ok := item.(entityItem)
+	if !ok {
+		d.base.Render(w, m, index, item)
+		return
+	}
+
+	if m.Width() <= 0 {
+		return
+	}
+
+	title := ei.Title()
+	desc := ei.Description()
+	s := d.base.Styles
+	catColor := lipgloss.Color(ei.category.color())
+
+	textwidth := m.Width() - s.NormalTitle.GetPaddingLeft() - s.NormalTitle.GetPaddingRight()
+	title = truncateAnsi(title, textwidth)
+	desc = truncateAnsi(desc, textwidth)
+
+	// Split title into ID portion and name portion.
+	idPart, namePart := title, ""
+	if sp := strings.Index(title, " "); sp >= 0 {
+		idPart = title[:sp]
+		namePart = title[sp:]
+	}
+
+	isSelected := index == m.Index()
+	emptyFilter := m.FilterState() == list.Filtering && m.FilterValue() == ""
+
+	if emptyFilter {
+		title = s.DimmedTitle.Render(title)
+		desc = s.DimmedDesc.Render(desc)
+	} else if isSelected && m.FilterState() != list.Filtering {
+		idStyled := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F8F8F2")).Render(idPart)
+		nameStyled := lipgloss.NewStyle().Foreground(catColor).Render(namePart)
+		title = s.SelectedTitle.Render(idStyled + nameStyled)
+		desc = s.SelectedDesc.Render(desc)
+	} else {
+		idStyled := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F8F8F2")).Render(idPart)
+		nameStyled := lipgloss.NewStyle().Foreground(catColor).Render(namePart)
+		title = s.NormalTitle.Render(idStyled + nameStyled)
+		desc = s.NormalDesc.Render(desc)
+	}
+
+	fmt.Fprintf(w, "%s\n%s", title, desc)
+}
+
+func entityFilter(term string, targets []string) []list.Rank {
+	// If the term looks like an ID search (#123 or just digits), do substring match on ID.
+	idSearch := ""
+	if strings.HasPrefix(term, "#") {
+		idSearch = term[1:]
+	} else if _, err := strconv.Atoi(term); err == nil {
+		idSearch = term
+	}
+
+	if idSearch != "" {
+		var results []list.Rank
+		for i, t := range targets {
+			// FilterValue starts with the entity ID followed by a space.
+			targetID := t
+			if sp := strings.IndexByte(t, ' '); sp > 0 {
+				targetID = t[:sp]
+			}
+			if strings.Contains(targetID, idSearch) {
+				results = append(results, list.Rank{Index: i})
+			}
+		}
+		return results
+	}
+
+	return list.DefaultFilter(term, targets)
+}
+
 func newEntityList() list.Model {
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(lipgloss.Color("#FF79C6")).
+	dd := list.NewDefaultDelegate()
+	dd.Styles.SelectedTitle = dd.Styles.SelectedTitle.
 		BorderLeftForeground(lipgloss.Color("#FF79C6"))
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
+	dd.Styles.SelectedDesc = dd.Styles.SelectedDesc.
 		Foreground(lipgloss.Color("#6272A4")).
 		BorderLeftForeground(lipgloss.Color("#FF79C6"))
+	delegate := entityDelegate{base: dd}
 
 	l := list.New(nil, delegate, 40, 20)
 	l.Title = "Entities"
+	l.Filter = entityFilter
 	l.Styles.Title = sectionTitleStyle
 	l.SetShowStatusBar(true)
 	l.SetShowHelp(false)
@@ -511,6 +595,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateOverlay()
 		}
 		return m, tickCmd()
+
+	default:
+		// Route other messages (e.g. FilterMatchesMsg) to the entity list.
+		var cmd tea.Cmd
+		m.entityList, cmd = m.entityList.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -569,7 +659,7 @@ func (m *model) updateEntityList() {
 		}
 	}
 
-	if m.entityList.FilterState() != list.Filtering {
+	if m.entityList.FilterState() == list.Unfiltered {
 		m.entityList.SetItems(items)
 		if selectedPtr != 0 {
 			m.entityList.Select(newSelectedIdx)
@@ -642,12 +732,28 @@ func (m *model) updateOverlay() {
 				}
 			}
 
-			ents = append(ents, overlayEntity{
+			oe := overlayEntity{
 				X:     x,
 				Y:     y,
 				Name:  name,
 				Color: hexToRGBA(cat.color()),
-			})
+			}
+			if hb := e.Hitbox; hb != nil {
+				oe.HasHitbox = true
+				oe.AabbMinX = hb.AabbMinX
+				oe.AabbMaxX = hb.AabbMaxX
+				oe.AabbMinY = hb.AabbMinY
+				oe.AabbMaxY = hb.AabbMaxY
+				oe.HitOffsetX = hb.OffsetX
+				oe.HitOffsetY = hb.OffsetY
+			} else if ct := e.CollisionTrigger; ct != nil {
+				oe.HasHitbox = true
+				oe.AabbMinX = -ct.Width / 2
+				oe.AabbMaxX = ct.Width / 2
+				oe.AabbMinY = -ct.Height / 2
+				oe.AabbMaxY = ct.Height / 2
+			}
+			ents = append(ents, oe)
 		}
 	}
 	m.overlay.entities.Store(&ents)
@@ -1081,6 +1187,17 @@ func (m model) viewLog() string {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+func truncateAnsi(s string, maxWidth int) string {
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	runes := []rune(s)
+	for len(runes) > 0 && lipgloss.Width(string(runes)) > maxWidth-1 {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes) + "…"
+}
 
 func row(label, value string) string {
 	return labelStyle.Render(label) + valueStyle.Render(value)

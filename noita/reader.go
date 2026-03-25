@@ -45,14 +45,16 @@ type GameState struct {
 
 // EntitySummary holds basic info about an entity for list display.
 type EntitySummary struct {
-	Entity       *Entity
-	Name         string
-	Ptr          uint32
-	HasHP        bool
-	HasWallet    bool
-	HasAbility   bool
-	HasCharData  bool
-	ComponentIDs []TypeID // all component type IDs present on this entity
+	Entity           *Entity
+	Name             string
+	Ptr              uint32
+	HasHP            bool
+	HasWallet        bool
+	HasAbility       bool
+	HasCharData      bool
+	Hitbox           *HitboxComponent           // nil if no hitbox
+	CollisionTrigger *CollisionTriggerComponent // nil if no trigger
+	ComponentIDs     []TypeID                   // all component type IDs present on this entity
 }
 
 // EntityDetails holds full component data for a selected entity.
@@ -441,14 +443,16 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 		name := entity.Name.FormatMsvcString(r.Ctx)
 		compIDs := r.FindEntityComponentIDs(em, slotIndex)
 		summary := &EntitySummary{
-			Entity:       entity,
-			Name:         name,
-			Ptr:          ePtr,
-			HasHP:        r.hasComponent(em, slotIndex, TypeIDDamageModelComponent),
-			HasWallet:    r.hasComponent(em, slotIndex, TypeIDWalletComponent),
-			HasAbility:   r.hasComponent(em, slotIndex, TypeIDAbilityComponent),
-			HasCharData:  r.hasComponent(em, slotIndex, TypeIDCharacterDataComponent),
-			ComponentIDs: compIDs,
+			Entity:           entity,
+			Name:             name,
+			Ptr:              ePtr,
+			HasHP:            r.hasComponent(em, slotIndex, TypeIDDamageModelComponent),
+			HasWallet:        r.hasComponent(em, slotIndex, TypeIDWalletComponent),
+			HasAbility:       r.hasComponent(em, slotIndex, TypeIDAbilityComponent),
+			HasCharData:      r.hasComponent(em, slotIndex, TypeIDCharacterDataComponent),
+			Hitbox:           readComponent[HitboxComponent](r, em, slotIndex, TypeIDHitboxComponent, ReadHitboxComponent),
+			CollisionTrigger: readComponent[CollisionTriggerComponent](r, em, slotIndex, TypeIDCollisionTriggerComponent, ReadCollisionTriggerComponent),
+			ComponentIDs:     compIDs,
 		}
 		summaries = append(summaries, summary)
 	}

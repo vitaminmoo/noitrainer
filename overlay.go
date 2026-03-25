@@ -15,9 +15,16 @@ import (
 
 // overlayEntity is a single entity to render on the overlay.
 type overlayEntity struct {
-	X, Y  float32
-	Name  string
-	Color color.RGBA
+	X, Y       float32
+	Name       string
+	Color      color.RGBA
+	HasHitbox  bool
+	AabbMinX   float32
+	AabbMaxX   float32
+	AabbMinY   float32
+	AabbMaxY   float32
+	HitOffsetX float32
+	HitOffsetY float32
 }
 
 // overlayData is the snapshot drawn each frame.
@@ -127,9 +134,30 @@ func (s *overlayScene) Draw(c *overlay.Canvas) {
 			if sx < wx-20 || sx > wx+ww+20 || sy < wy-20 || sy > wy+wh+20 {
 				continue
 			}
-			c.Ellipse(sx, sy, 6, 6, e.Color)
-			if e.Name != "" {
-				c.Text(e.Name, sx+8, sy-lineH/2, e.Color)
+
+			if e.HasHitbox {
+				// Draw AABB rectangle (hitbox-relative coords scaled to screen).
+				ox := float64(e.HitOffsetX) * scaleX
+				oy := float64(e.HitOffsetY) * scaleY
+				x0 := sx + ox + float64(e.AabbMinX)*scaleX
+				y0 := sy + oy + float64(e.AabbMinY)*scaleY
+				x1 := sx + ox + float64(e.AabbMaxX)*scaleX
+				y1 := sy + oy + float64(e.AabbMaxY)*scaleY
+				c.Line(x0, y0, x1, y0, e.Color) // top
+				c.Line(x1, y0, x1, y1, e.Color) // right
+				c.Line(x1, y1, x0, y1, e.Color) // bottom
+				c.Line(x0, y1, x0, y0, e.Color) // left
+				// Label centered above the hitbox.
+				if e.Name != "" {
+					tw := float64(c.TextWidth(e.Name))
+					cx := (x0 + x1) / 2
+					c.Text(e.Name, cx-tw/2, y0-lineH-2, e.Color)
+				}
+			} else {
+				c.Ellipse(sx, sy, 6, 6, e.Color)
+				if e.Name != "" {
+					c.Text(e.Name, sx+8, sy-lineH/2, e.Color)
+				}
 			}
 		}
 	}

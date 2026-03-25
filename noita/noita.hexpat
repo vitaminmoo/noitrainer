@@ -395,6 +395,43 @@ struct AbilityComponent {
 } [[color("AA44FF")]];
 
 // =============================================================================
+// HitboxComponent (0x68 bytes, typeId=63) — AABB collision hitbox
+// =============================================================================
+
+struct HitboxComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48
+    bool is_player              [[comment("Is a player hitbox")]];
+    bool is_enemy               [[comment("Is an enemy hitbox (default: true)")]];
+    bool is_item                [[comment("Is an item hitbox")]];
+    padding[1];                 // alignment
+
+    // +0x4C
+    float aabb_min_x            [[comment("Bounding box min X relative to entity (default: -5)")]];
+    float aabb_max_x            [[comment("Bounding box max X relative to entity (default: 5)")]];
+    float aabb_min_y            [[comment("Bounding box min Y relative to entity (default: -5)")]];
+    float aabb_max_y            [[comment("Bounding box max Y relative to entity (default: 5)")]];
+    float damage_multiplier     [[comment("Damage multiplier for hits to this hitbox (default: 1.0)")]];
+    float offset_x              [[comment("Hitbox offset X from entity center")]];
+    float offset_y              [[comment("Hitbox offset Y from entity center")]];
+} [[color("FF8844")]];
+
+// =============================================================================
+// CollisionTriggerComponent (typeId=25) — trigger zone with width/height/radius
+// =============================================================================
+
+struct CollisionTriggerComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48
+    float width                 [[comment("Trigger zone width (default: 32)")]];
+    float height                [[comment("Trigger zone height (default: 32)")]];
+    float radius                [[comment("Trigger zone radius (default: 32)")]];
+    MsvcString required_tag     [[comment("Tag required to trigger (default: mortal)")]];
+} [[color("6272A4")]];
+
+// =============================================================================
 // Inventory2Component (~0x80 bytes, typeId=73) — on player entity
 // =============================================================================
 
