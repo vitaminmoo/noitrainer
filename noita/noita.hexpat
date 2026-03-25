@@ -432,6 +432,84 @@ struct CollisionTriggerComponent {
 } [[color("6272A4")]];
 
 // =============================================================================
+// SpriteComponent (0xF0 bytes, typeId=141) — visual sprite
+// =============================================================================
+
+struct SpriteComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48
+    MsvcString image_file       [[comment("Path to sprite image file")]];
+    // remaining fields not needed
+} [[color("AAAAAA")]];
+
+// =============================================================================
+// ItemComponent (typeId=80) — item in world or inventory
+// =============================================================================
+
+struct ItemComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48
+    MsvcString item_name        [[comment("Name of the item (e.g. $item_potion)")]];
+    // +0x60
+    bool is_stackable;
+    bool is_consumable;
+    bool stats_count_as_item_pick_up;
+    bool auto_pickup;
+    u32 unknown_64              [[hidden]];
+    // +0x68
+    s32 uses_remaining          [[comment("Uses left; -1=unlimited")]];
+    bool is_identified;
+    bool is_frozen;
+} [[color("F1FA8C")]];
+
+// =============================================================================
+// VelocityComponent (typeId=155) — physics velocity and gravity
+// =============================================================================
+
+struct VelocityComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48
+    float gravity_x             [[comment("Horizontal gravity (default: 0)")]];
+    float gravity_y             [[comment("Vertical gravity (default: 400)")]];
+    float mass                  [[comment("Physics mass (default: 0.05)")]];
+    float air_friction          [[comment("Air resistance 0-1 (default: 0.55)")]];
+    float terminal_velocity     [[comment("Max velocity (default: 1000)")]];
+} [[color("8BE9FD")]];
+
+// =============================================================================
+// LightComponent (typeId=89) — light source
+// =============================================================================
+
+struct LightComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48
+    u32 internal_ptr             [[hidden]];
+    // +0x4C
+    float radius                [[comment("Light radius in pixels (default: 0)")]];
+    u32 r                       [[color("FF0000"), comment("Red 0-255 (default: 255)")]];
+    u32 g                       [[color("00FF00"), comment("Green 0-255 (default: 178)")]];
+    u32 b                       [[color("0000FF"), comment("Blue 0-255 (default: 118)")]];
+    float offset_x;
+    float offset_y;
+} [[color("FFD700")]];
+
+// =============================================================================
+// GameEffectComponent (typeId=53) — status effect on entity
+// =============================================================================
+
+struct GameEffectComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48
+    s32 effect                  [[comment("GAME_EFFECT enum value")]];
+    s32 frames                  [[comment("Duration in frames; -1=forever")]];
+} [[color("BD93F9")]];
+
+// =============================================================================
 // Inventory2Component (~0x80 bytes, typeId=73) — on player entity
 // =============================================================================
 

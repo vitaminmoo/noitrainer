@@ -1041,6 +1041,59 @@ func (m model) renderEntityDetail() string {
 		sections = append(sections, renderSection("Ability", rows))
 	}
 
+	if d.Item != nil {
+		itemName := d.Item.ItemName.FormatMsvcString(m.reader.Ctx)
+		if itemName != "" {
+			rows := []string{row("Item Name", itemName)}
+			if d.Item.UsesRemaining != -1 {
+				rows = append(rows, row("Uses", fmt.Sprintf("%d", d.Item.UsesRemaining)))
+			}
+			sections = append(sections, renderSection("Item", rows))
+		}
+	}
+
+	if d.Sprite != nil {
+		imgFile := d.Sprite.ImageFile.FormatMsvcString(m.reader.Ctx)
+		if imgFile != "" {
+			// Shorten long paths: strip common prefix.
+			imgFile = strings.TrimPrefix(imgFile, "data/")
+			sections = append(sections, renderSection("Sprite", []string{
+				row("Image", dimStyle.Render(imgFile)),
+			}))
+		}
+	}
+
+	if d.Velocity != nil {
+		v := d.Velocity
+		rows := []string{
+			row("Gravity", fmt.Sprintf("%.0f, %.0f", v.GravityX, v.GravityY)),
+			row("Mass", fmt.Sprintf("%.3f", v.Mass)),
+		}
+		if v.AirFriction != 0.55 { // only show if non-default
+			rows = append(rows, row("Air Friction", fmt.Sprintf("%.2f", v.AirFriction)))
+		}
+		sections = append(sections, renderSection("Physics", rows))
+	}
+
+	if d.Light != nil && d.Light.Radius > 0 {
+		sections = append(sections, renderSection("Light", []string{
+			row("Radius", fmt.Sprintf("%.0f", d.Light.Radius)),
+			row("Color", fmt.Sprintf("rgb(%d, %d, %d)", d.Light.R, d.Light.G, d.Light.B)),
+		}))
+	}
+
+	if d.Effect != nil {
+		rows := []string{
+			row("Effect", fmt.Sprintf("%d", d.Effect.Effect)),
+		}
+		if d.Effect.Frames >= 0 {
+			rows = append(rows, row("Frames Left", fmt.Sprintf("%d", d.Effect.Frames)))
+		} else {
+			rows = append(rows, row("Duration", "permanent"))
+		}
+		sections = append(sections, renderSection("Effect", rows))
+	}
+
 	if len(d.Children) > 0 {
 		var rows []string
 		for _, child := range d.Children {

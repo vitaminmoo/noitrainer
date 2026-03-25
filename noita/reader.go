@@ -66,6 +66,11 @@ type EntityDetails struct {
 	Char     *CharacterDataComponent
 	Inv      *Inventory2Component
 	Ability  *AbilityComponent
+	Sprite   *SpriteComponent
+	Item     *ItemComponent
+	Velocity *VelocityComponent
+	Light    *LightComponent
+	Effect   *GameEffectComponent
 	Children []*EntitySummary
 }
 
@@ -477,13 +482,18 @@ func (r *Reader) ReadEntityDetails(entityPtr uint32) *EntityDetails {
 	}
 
 	details := &EntityDetails{
-		Entity:  e,
-		Name:    e.Name.FormatMsvcString(r.Ctx),
-		HP:      readComponent[DamageModelComponent](r, em, e.SlotIndex, TypeIDDamageModelComponent, ReadDamageModelComponent),
-		Wallet:  readComponent[WalletComponent](r, em, e.SlotIndex, TypeIDWalletComponent, ReadWalletComponent),
-		Char:    readComponent[CharacterDataComponent](r, em, e.SlotIndex, TypeIDCharacterDataComponent, ReadCharacterDataComponent),
-		Inv:     readComponent[Inventory2Component](r, em, e.SlotIndex, TypeIDInventory2Component, ReadInventory2Component),
-		Ability: readComponent[AbilityComponent](r, em, e.SlotIndex, TypeIDAbilityComponent, ReadAbilityComponent),
+		Entity:   e,
+		Name:     e.Name.FormatMsvcString(r.Ctx),
+		HP:       readComponent[DamageModelComponent](r, em, e.SlotIndex, TypeIDDamageModelComponent, ReadDamageModelComponent),
+		Wallet:   readComponent[WalletComponent](r, em, e.SlotIndex, TypeIDWalletComponent, ReadWalletComponent),
+		Char:     readComponent[CharacterDataComponent](r, em, e.SlotIndex, TypeIDCharacterDataComponent, ReadCharacterDataComponent),
+		Inv:      readComponent[Inventory2Component](r, em, e.SlotIndex, TypeIDInventory2Component, ReadInventory2Component),
+		Ability:  readComponent[AbilityComponent](r, em, e.SlotIndex, TypeIDAbilityComponent, ReadAbilityComponent),
+		Sprite:   readComponent[SpriteComponent](r, em, e.SlotIndex, TypeIDSpriteComponent, ReadSpriteComponent),
+		Item:     readComponent[ItemComponent](r, em, e.SlotIndex, TypeIDItemComponent, ReadItemComponent),
+		Velocity: readComponent[VelocityComponent](r, em, e.SlotIndex, TypeIDVelocityComponent, ReadVelocityComponent),
+		Light:    readComponent[LightComponent](r, em, e.SlotIndex, TypeIDLightComponent, ReadLightComponent),
+		Effect:   readComponent[GameEffectComponent](r, em, e.SlotIndex, TypeIDGameEffectComponent, ReadGameEffectComponent),
 	}
 
 	// Read children
