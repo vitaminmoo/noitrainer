@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/vitaminmoo/memtools/hexpat/runtime"
 	"github.com/vitaminmoo/memtools/process"
 	"noitrainer/noita"
 )
@@ -241,6 +242,9 @@ func categorize(e *noita.EntitySummary) entityCategory {
 	if has[noita.TypeIDVerletPhysicsComponent] && !has[noita.TypeIDDamageModelComponent] {
 		return catProp
 	}
+	if has[noita.TypeIDExplodeOnDamageComponent] || (has[noita.TypeIDPhysicsBody2Component] && has[noita.TypeIDDamageModelComponent]) {
+		return catProp
+	}
 	if has[noita.TypeIDSimplePhysicsComponent] || has[noita.TypeIDPixelSpriteComponent] {
 		return catPhysics
 	}
@@ -299,6 +303,12 @@ func subcategorize(e *noita.EntitySummary) string {
 		if has[noita.TypeIDVerletWorldJointComponent] {
 			return "hanging"
 		}
+		if has[noita.TypeIDExplodeOnDamageComponent] {
+			return "destructible"
+		}
+		if has[noita.TypeIDPhysicsBody2Component] && !has[noita.TypeIDVerletPhysicsComponent] {
+			return "physics"
+		}
 		return "loose"
 	case catEffect:
 		if has[noita.TypeIDInheritTransformComponent] {
@@ -315,11 +325,35 @@ func subcategorize(e *noita.EntitySummary) string {
 		if has[noita.TypeIDWorldStateComponent] {
 			return "world"
 		}
+		if has[noita.TypeIDLifetimeComponent] {
+			return "particle"
+		}
 		if has[noita.TypeIDCameraBoundComponent] {
+			if has[noita.TypeIDPhysicsBodyComponent] {
+				return "terrain"
+			}
+			if has[noita.TypeIDDamageModelComponent] {
+				return "breakable"
+			}
 			return "camera"
 		}
 		return "misc"
 	}
+}
+
+// shortFilename extracts a short label from a file path like
+// "data/enemies_gfx/zombie_weak.xml" → "zombie_weak"
+func shortFilename(path string) string {
+	path = strings.TrimPrefix(path, "data/")
+	// Strip common prefixes
+	for _, prefix := range []string{"scripts/buildings/", "scripts/audio/", "scripts/", "enemies_gfx/", "items_gfx/", "props_gfx/"} {
+		path = strings.TrimPrefix(path, prefix)
+	}
+	// Strip extension
+	if idx := strings.LastIndex(path, "."); idx > 0 {
+		path = path[:idx]
+	}
+	return path
 }
 
 func entityDisplayName(e *noita.EntitySummary) string {
@@ -337,16 +371,69 @@ func entityDisplayName(e *noita.EntitySummary) string {
 	return name
 }
 
+// entityRichName returns a better display name using sprite/lua paths when available.
+func entityRichName(e *noita.EntitySummary, ctx *runtime.ReadContext) string {
+	// Start with the basic name.
+	name := entityDisplayName(e)
+
+	// Use item_name if available (strips common prefixes for readability).
+	if e.Item != nil {
+		itemName := e.Item.ItemName.FormatMsvcString(ctx)
+		if itemName != "" {
+			itemName = strings.TrimPrefix(itemName, "$")
+			itemName = strings.TrimPrefix(itemName, "item_")
+			name = itemName
+		}
+	}
+
+	// If we only got a generic subcategory name, try sprite/lua paths.
+	if e.Name == "" || e.Name == "unknown" {
+		if e.Item == nil || e.Item.ItemName.Length == 0 {
+			if e.Sprite != nil {
+				imgFile := e.Sprite.ImageFile.FormatMsvcString(ctx)
+				if imgFile != "" {
+					name = shortFilename(imgFile)
+				}
+			}
+			if name == entityDisplayName(e) && e.Lua != nil {
+				script := e.Lua.ScriptSourceFile.FormatMsvcString(ctx)
+				if script != "" {
+					name = shortFilename(script)
+				}
+			}
+		}
+	}
+
+	// Append potion/flask contents.
+	if len(e.Contents) > 0 {
+		has := make(map[noita.TypeID]bool)
+		for _, id := range e.ComponentIDs {
+			has[id] = true
+		}
+		if has[noita.TypeIDPotionComponent] {
+			var mats []string
+			for _, c := range e.Contents {
+				matName := strings.TrimPrefix(c.Name, "magic_liquid_")
+				mats = append(mats, matName)
+			}
+			name += " [" + strings.Join(mats, "+") + "]"
+		}
+	}
+
+	return name
+}
+
 // ── List items ─────────────────────────────────────────────────────
 
 type entityItem struct {
 	summary     *noita.EntitySummary
 	category    entityCategory
 	subcategory string
+	displayName string // cached rich name
 }
 
 func (i entityItem) Title() string {
-	return fmt.Sprintf("#%d %s", i.summary.Entity.EntityId, entityDisplayName(i.summary))
+	return fmt.Sprintf("#%d %s", i.summary.Entity.EntityId, i.displayName)
 }
 
 func (i entityItem) Description() string {
@@ -362,7 +449,7 @@ func (i entityItem) Description() string {
 }
 
 func (i entityItem) FilterValue() string {
-	return fmt.Sprintf("%d %s %s %s", i.summary.Entity.EntityId, i.category.String(), i.subcategory, entityDisplayName(i.summary))
+	return fmt.Sprintf("%d %s %s %s", i.summary.Entity.EntityId, i.category.String(), i.subcategory, i.displayName)
 }
 
 // ── Model ──────────────────────────────────────────────────────────
@@ -638,6 +725,7 @@ func (m *model) updateEntityList() {
 			summary:     e,
 			category:    cat,
 			subcategory: subcategorize(e),
+			displayName: entityRichName(e, m.reader.Ctx),
 		})
 	}
 	m.categoryCounts = counts
@@ -761,7 +849,7 @@ func (m *model) updateOverlay() {
 
 			name := ""
 			if m.overlayOpts[optShowLabels] {
-				name = entityDisplayName(e)
+				name = entityRichName(e, m.reader.Ctx)
 			}
 			if m.overlayOpts[optShowEntityIDs] {
 				id := fmt.Sprintf("#%d", e.Entity.EntityId)
@@ -1052,6 +1140,14 @@ func (m model) renderEntityDetail() string {
 		}
 	}
 
+	if len(d.Contents) > 0 {
+		var rows []string
+		for _, mat := range d.Contents {
+			rows = append(rows, row(mat.Name, fmt.Sprintf("%.0f", mat.Amount)))
+		}
+		sections = append(sections, renderSection("Contents", rows))
+	}
+
 	if d.Sprite != nil {
 		imgFile := d.Sprite.ImageFile.FormatMsvcString(m.reader.Ctx)
 		if imgFile != "" {
@@ -1092,6 +1188,16 @@ func (m model) renderEntityDetail() string {
 			rows = append(rows, row("Duration", "permanent"))
 		}
 		sections = append(sections, renderSection("Effect", rows))
+	}
+
+	if d.Lua != nil {
+		script := d.Lua.ScriptSourceFile.FormatMsvcString(m.reader.Ctx)
+		if script != "" {
+			script = strings.TrimPrefix(script, "data/")
+			sections = append(sections, renderSection("Script", []string{
+				row("File", dimStyle.Render(script)),
+			}))
+		}
 	}
 
 	if len(d.Children) > 0 {

@@ -54,6 +54,10 @@ type EntitySummary struct {
 	HasCharData      bool
 	Hitbox           *HitboxComponent           // nil if no hitbox
 	CollisionTrigger *CollisionTriggerComponent // nil if no trigger
+	Sprite           *SpriteComponent           // nil if no sprite
+	Lua              *LuaComponent              // nil if no lua
+	Item             *ItemComponent             // nil if no item
+	Contents         []MaterialContent          // potion/flask contents
 	ComponentIDs     []TypeID                   // all component type IDs present on this entity
 }
 
@@ -71,6 +75,8 @@ type EntityDetails struct {
 	Velocity *VelocityComponent
 	Light    *LightComponent
 	Effect   *GameEffectComponent
+	Lua      *LuaComponent
+	Contents []MaterialContent
 	Children []*EntitySummary
 }
 
@@ -459,6 +465,10 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 			HasCharData:      r.hasComponent(em, slotIndex, TypeIDCharacterDataComponent),
 			Hitbox:           readComponent[HitboxComponent](r, em, slotIndex, TypeIDHitboxComponent, ReadHitboxComponent),
 			CollisionTrigger: readComponent[CollisionTriggerComponent](r, em, slotIndex, TypeIDCollisionTriggerComponent, ReadCollisionTriggerComponent),
+			Sprite:           readComponent[SpriteComponent](r, em, slotIndex, TypeIDSpriteComponent, ReadSpriteComponent),
+			Lua:              readComponent[LuaComponent](r, em, slotIndex, TypeIDLuaComponent, ReadLuaComponent),
+			Item:             readComponent[ItemComponent](r, em, slotIndex, TypeIDItemComponent, ReadItemComponent),
+			Contents:         r.readPotionContents(em, slotIndex),
 			ComponentIDs:     compIDs,
 		}
 		summaries = append(summaries, summary)
@@ -494,7 +504,9 @@ func (r *Reader) ReadEntityDetails(entityPtr uint32) *EntityDetails {
 		Velocity: readComponent[VelocityComponent](r, em, e.SlotIndex, TypeIDVelocityComponent, ReadVelocityComponent),
 		Light:    readComponent[LightComponent](r, em, e.SlotIndex, TypeIDLightComponent, ReadLightComponent),
 		Effect:   readComponent[GameEffectComponent](r, em, e.SlotIndex, TypeIDGameEffectComponent, ReadGameEffectComponent),
+		Lua:      readComponent[LuaComponent](r, em, e.SlotIndex, TypeIDLuaComponent, ReadLuaComponent),
 	}
+	details.Contents = r.readPotionContents(em, e.SlotIndex)
 
 	// Read children
 	childPtrs := r.readChildEntityPtrs(e)

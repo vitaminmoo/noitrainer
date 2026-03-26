@@ -510,6 +510,19 @@ struct GameEffectComponent {
 } [[color("BD93F9")]];
 
 // =============================================================================
+// LuaComponent (typeId=96) — Lua scripting
+// =============================================================================
+
+struct LuaComponent {
+    ComponentHeader header      [[inline]];
+
+    // +0x48 — internal state before script_source_file
+    padding[0xAC];
+    // +0xF4
+    MsvcString script_source_file [[comment("Path to .lua script file")]];
+} [[color("50FA7B")]];
+
+// =============================================================================
 // Inventory2Component (~0x80 bytes, typeId=73) — on player entity
 // =============================================================================
 
