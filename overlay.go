@@ -4,6 +4,7 @@ import (
 	"context"
 	"image/color"
 	"log"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -147,11 +148,16 @@ func (s *overlayScene) Draw(c *overlay.Canvas) {
 				c.Line(x1, y0, x1, y1, e.Color) // right
 				c.Line(x1, y1, x0, y1, e.Color) // bottom
 				c.Line(x0, y1, x0, y0, e.Color) // left
-				// Label centered above the hitbox.
+				// Label centered above the hitbox, clamped to window top
+				// so it stays readable when the hitbox top is off-screen.
 				if e.Name != "" {
 					tw := float64(c.TextWidth(e.Name))
 					cx := (x0 + x1) / 2
-					c.Text(e.Name, cx-tw/2, y0-lineH-2, e.Color)
+					labelY := y0 - lineH - 2
+					if labelY < wy && y1 > wy {
+						labelY = wy + 2
+					}
+					c.Text(e.Name, cx-tw/2, labelY, e.Color)
 				}
 			} else {
 				c.Ellipse(sx, sy, 6, 6, e.Color)
@@ -179,11 +185,20 @@ func (s *overlayScene) Draw(c *overlay.Canvas) {
 func startOverlay(ctx context.Context) *overlayScene {
 	scene := &overlayScene{}
 
+	matchFunc := func(name string) bool {
+		return strings.HasPrefix(name, "Noita - Build")
+	}
+
+	var matcher overlay.WindowMatcher
+	if os.Getenv("SWAYSOCK") != "" {
+		matcher = overlay.NewSwayMatcher(matchFunc)
+	} else {
+		matcher = overlay.NewKWinMatcher(matchFunc)
+	}
+
 	opts := overlay.Options{
-		WindowMatcher: overlay.NewKWinMatcher(func(name string) bool {
-			return strings.HasPrefix(name, "Noita - Build")
-		}),
-		UpdateRate: 16 * time.Millisecond, // ~60Hz
+		WindowMatcher: matcher,
+		UpdateRate:    16 * time.Millisecond, // ~60Hz
 	}
 
 	go func() {

@@ -118,10 +118,28 @@ func (item *InventoryItem) Name(ctx *runtime.ReadContext) string {
 }
 
 
+// bufferMeta caches per-frame metadata for a single ComponentBuffer.
+// These fields are buffer-level (not entity-level) and don't change
+// between entities within a single tick, so we read them once.
+type bufferMeta struct {
+	valid       bool
+	activeCount int32
+	sparseBegin uint32
+	sparseEnd   uint32
+	compBegin   uint32
+	compEnd     uint32
+	nextBegin   uint32
+	nextEnd     uint32
+}
+
 // Reader reads Noita game state from process memory.
 type Reader struct {
 	proc io.ReadSeeker
 	Ctx  *runtime.ReadContext
+	// bufCache is populated once per ReadEntityList call and used by
+	// FindEntityComponentIDs, hasComponent, readAllComponents, etc.
+	// Indexed by TypeID. Nil outside of ReadEntityList.
+	bufCache []bufferMeta
 }
 
 func NewReader(proc io.ReadSeeker) *Reader {
@@ -297,50 +315,103 @@ func lookupComponentBufferPtr(em *EntityManager, typeID TypeID) uint32 {
 	return em.ComponentBuffers.Elements[int(typeID)]
 }
 
-// findComponentPtr resolves a component pointer using lazy ComponentBuffer reads.
-func (r *Reader) findComponentPtr(em *EntityManager, slotIndex int32, typeID TypeID) uint32 {
+// buildBufferCache bulk-reads metadata for all component buffers in one
+// syscall each. The fields cached (ActiveCount, SparseIndex, Components,
+// NextIndex begin/end pointers) are buffer-level, not entity-level, so
+// they're identical for every entity within a single tick.
+func (r *Reader) buildBufferCache(em *EntityManager) {
+	n := len(em.ComponentBuffers.Elements)
+	r.bufCache = make([]bufferMeta, n)
+	for i, bufPtr := range em.ComponentBuffers.Elements {
+		if bufPtr == 0 {
+			continue
+		}
+		// Read offsets 16..155 (140 bytes) covering SparseIndex through ActiveCount.
+		var raw [140]byte
+		if _, err := r.Ctx.ReadAt(raw[:], int64(bufPtr)+16); err != nil {
+			continue
+		}
+		// Offsets relative to raw (raw[0] = ComponentBuffer offset 16):
+		//   SparseIndex.BeginPtr = CB+16  → raw[0]
+		//   SparseIndex.EndPtr   = CB+20  → raw[4]
+		//   NextIndex.BeginPtr   = CB+52  → raw[36]
+		//   NextIndex.EndPtr     = CB+56  → raw[40]
+		//   Components.BeginPtr  = CB+64  → raw[48]
+		//   Components.EndPtr    = CB+68  → raw[52]
+		//   ActiveCount          = CB+152 → raw[136]
+		r.bufCache[i] = bufferMeta{
+			valid:       true,
+			sparseBegin: binary.LittleEndian.Uint32(raw[0:]),
+			sparseEnd:   binary.LittleEndian.Uint32(raw[4:]),
+			nextBegin:   binary.LittleEndian.Uint32(raw[36:]),
+			nextEnd:     binary.LittleEndian.Uint32(raw[40:]),
+			compBegin:   binary.LittleEndian.Uint32(raw[48:]),
+			compEnd:     binary.LittleEndian.Uint32(raw[52:]),
+			activeCount: int32(binary.LittleEndian.Uint32(raw[136:])),
+		}
+	}
+}
+
+// cachedMeta returns the cached buffer metadata for a type ID, or an
+// invalid entry if no cache is available or the typeID is out of range.
+func (r *Reader) cachedMeta(em *EntityManager, typeID TypeID) bufferMeta {
+	if r.bufCache != nil && int(typeID) < len(r.bufCache) {
+		return r.bufCache[int(typeID)]
+	}
+	// Fallback: no cache, do live reads (for callers outside ReadEntityList).
 	bufferPtr := lookupComponentBufferPtr(em, typeID)
 	if bufferPtr == 0 {
+		return bufferMeta{}
+	}
+	var raw [140]byte
+	if _, err := r.Ctx.ReadAt(raw[:], int64(bufferPtr)+16); err != nil {
+		return bufferMeta{}
+	}
+	return bufferMeta{
+		valid:       true,
+		sparseBegin: binary.LittleEndian.Uint32(raw[0:]),
+		sparseEnd:   binary.LittleEndian.Uint32(raw[4:]),
+		nextBegin:   binary.LittleEndian.Uint32(raw[36:]),
+		nextEnd:     binary.LittleEndian.Uint32(raw[40:]),
+		compBegin:   binary.LittleEndian.Uint32(raw[48:]),
+		compEnd:     binary.LittleEndian.Uint32(raw[52:]),
+		activeCount: int32(binary.LittleEndian.Uint32(raw[136:])),
+	}
+}
+
+// findComponentPtr resolves a component pointer using cached ComponentBuffer metadata.
+func (r *Reader) findComponentPtr(em *EntityManager, slotIndex int32, typeID TypeID) uint32 {
+	meta := r.cachedMeta(em, typeID)
+	if !meta.valid {
 		return 0
 	}
-	cbr := NewComponentBufferReader(r.Ctx, uintptr(bufferPtr))
-	sparse := cbr.SparseIndex()
-	beginPtr, _ := sparse.BeginPtr()
-	endPtr, _ := sparse.EndPtr()
-	numSparse := (endPtr - beginPtr) / 4
+	numSparse := (meta.sparseEnd - meta.sparseBegin) / 4
 	if uint32(slotIndex) >= numSparse {
 		return 0
 	}
-	denseIdx, err := r.readS32(int64(beginPtr) + int64(slotIndex)*4)
+	denseIdx, err := r.readS32(int64(meta.sparseBegin) + int64(slotIndex)*4)
 	if err != nil || denseIdx < 0 {
 		return 0
 	}
-	comps := cbr.Components()
-	compBegin, _ := comps.BeginPtr()
-	compEnd, _ := comps.EndPtr()
-	numComps := (compEnd - compBegin) / 4
+	numComps := (meta.compEnd - meta.compBegin) / 4
 	if uint32(denseIdx) >= numComps {
 		return 0
 	}
-	compPtr, _ := r.readU32(int64(compBegin) + int64(denseIdx)*4)
+	compPtr, _ := r.readU32(int64(meta.compBegin) + int64(denseIdx)*4)
 	return compPtr
 }
 
-// hasComponent checks if an entity has a component type, reading minimal data.
+// hasComponent checks if an entity has a component type using cached metadata.
 func (r *Reader) hasComponent(em *EntityManager, slotIndex int32, typeID TypeID) bool {
-	bufferPtr := lookupComponentBufferPtr(em, typeID)
-	if bufferPtr == 0 {
+	meta := r.cachedMeta(em, typeID)
+	if !meta.valid {
 		return false
 	}
-	cbr := NewComponentBufferReader(r.Ctx, uintptr(bufferPtr))
-	sparse := cbr.SparseIndex()
-	beginPtr, _ := sparse.BeginPtr()
-	endPtr, _ := sparse.EndPtr()
-	numSparse := (endPtr - beginPtr) / 4
+	numSparse := (meta.sparseEnd - meta.sparseBegin) / 4
 	if uint32(slotIndex) >= numSparse {
 		return false
 	}
-	denseIdx, err := r.readS32(int64(beginPtr) + int64(slotIndex)*4)
+	denseIdx, err := r.readS32(int64(meta.sparseBegin) + int64(slotIndex)*4)
 	return err == nil && denseIdx >= 0
 }
 
@@ -410,6 +481,12 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 	if em == nil {
 		return nil
 	}
+
+	// Cache component buffer metadata for the duration of this call.
+	// This eliminates ~200 syscalls/entity for buffer-level fields that
+	// don't change between entities.
+	r.buildBufferCache(em)
+	defer func() { r.bufCache = nil }()
 
 	count := (em.EntityArray.EndPtr - em.EntityArray.BeginPtr) / 4
 	if count == 0 || count > 100000 {
@@ -614,30 +691,24 @@ func (r *Reader) ReadEntityManagerPtr() (*EntityManager, uint32) {
 }
 
 // FindEntityComponentIDs returns all component type IDs that an entity has.
+// Uses bufCache when available (within ReadEntityList) to avoid repeated
+// syscalls for buffer metadata that doesn't change between entities.
 func (r *Reader) FindEntityComponentIDs(em *EntityManager, slotIndex int32) []TypeID {
 	if slotIndex < 0 || em == nil {
 		return nil
 	}
 
 	var ids []TypeID
-	for typeID, bufPtr := range em.ComponentBuffers.Elements {
-		if bufPtr == 0 {
+	for typeID := range em.ComponentBuffers.Elements {
+		meta := r.cachedMeta(em, TypeID(typeID))
+		if !meta.valid || meta.activeCount == 0 {
 			continue
 		}
-		// Lazy read — only access ActiveCount and SparseIndex
-		cbr := NewComponentBufferReader(r.Ctx, uintptr(bufPtr))
-		activeCount, _ := cbr.ActiveCount()
-		if activeCount == 0 {
-			continue
-		}
-		sparse := cbr.SparseIndex()
-		beginPtr, _ := sparse.BeginPtr()
-		endPtr, _ := sparse.EndPtr()
-		numSparse := (endPtr - beginPtr) / 4
+		numSparse := (meta.sparseEnd - meta.sparseBegin) / 4
 		if uint32(slotIndex) >= numSparse {
 			continue
 		}
-		denseIdx, err := r.readS32(int64(beginPtr) + int64(slotIndex)*4)
+		denseIdx, err := r.readS32(int64(meta.sparseBegin) + int64(slotIndex)*4)
 		if err != nil || denseIdx < 0 {
 			continue
 		}
@@ -671,45 +742,35 @@ func readComponent[T any](r *Reader, em *EntityManager, slotIndex int32, typeID 
 }
 
 // readAllComponents reads all components of a given type for an entity, following the linked chain.
+// Uses cached buffer metadata when available.
 func readAllComponents[T any](r *Reader, em *EntityManager, slotIndex int32, typeID TypeID, readFn readFunc[T]) []*T {
 	if slotIndex < 0 {
 		return nil
 	}
 
-	bufferPtr := lookupComponentBufferPtr(em, typeID)
-	if bufferPtr == 0 {
+	meta := r.cachedMeta(em, typeID)
+	if !meta.valid {
 		return nil
 	}
 
-	cbr := NewComponentBufferReader(r.Ctx, uintptr(bufferPtr))
-	sparse := cbr.SparseIndex()
-	sparseBegin, _ := sparse.BeginPtr()
-	sparseEnd, _ := sparse.EndPtr()
-	numSparse := (sparseEnd - sparseBegin) / 4
+	numSparse := (meta.sparseEnd - meta.sparseBegin) / 4
 	if uint32(slotIndex) >= numSparse {
 		return nil
 	}
-	denseIdx, err := r.readS32(int64(sparseBegin) + int64(slotIndex)*4)
+	denseIdx, err := r.readS32(int64(meta.sparseBegin) + int64(slotIndex)*4)
 	if err != nil || denseIdx < 0 {
 		return nil
 	}
 
-	comps := cbr.Components()
-	compBegin, _ := comps.BeginPtr()
-	compEnd, _ := comps.EndPtr()
-	next := cbr.NextIndex()
-	nextBegin, _ := next.BeginPtr()
-	nextEnd, _ := next.EndPtr()
-
 	var results []*T
 
 	for denseIdx >= 0 {
-		numComponents := (compEnd - compBegin) / 4
+		numComponents := (meta.compEnd - meta.compBegin) / 4
 		if uint32(denseIdx) >= numComponents {
 			break
 		}
 
-		compPtr, err := r.readU32(int64(compBegin) + int64(denseIdx)*4)
+		compPtr, err := r.readU32(int64(meta.compBegin) + int64(denseIdx)*4)
 		if err != nil || compPtr == 0 {
 			break
 		}
@@ -720,11 +781,11 @@ func readAllComponents[T any](r *Reader, em *EntityManager, slotIndex int32, typ
 		}
 
 		// Follow nextIndex chain for multiple components of same type
-		numNext := (nextEnd - nextBegin) / 4
+		numNext := (meta.nextEnd - meta.nextBegin) / 4
 		if uint32(denseIdx) >= numNext {
 			break
 		}
-		nextIdx, err := r.readS32(int64(nextBegin) + int64(denseIdx)*4)
+		nextIdx, err := r.readS32(int64(meta.nextBegin) + int64(denseIdx)*4)
 		if err != nil {
 			break
 		}

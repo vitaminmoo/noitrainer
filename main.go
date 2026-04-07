@@ -6,6 +6,8 @@ import (
 	"image/color"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
@@ -1460,6 +1462,13 @@ func dmgMultsNonDefault(d *noita.DamageModelComponent) []string {
 }
 
 func main() {
+	go func() {
+		log.Println("pprof server starting on :4200")
+		if err := http.ListenAndServe(":4200", nil); err != nil {
+			log.Printf("pprof server error: %v", err)
+		}
+	}()
+
 	logBuf := newRingLog(20)
 	log.SetOutput(logBuf)
 	log.SetFlags(log.Ltime)
