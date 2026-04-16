@@ -1912,8 +1912,9 @@ func (s *MsvcString) FormatMsvcString(ctx *runtime.ReadContext) string {
 		return ""
 	}
 	if s.Capacity <= 15 {
+		n := min(s.Length, uint32(len(s.Data)))
 		result := ""
-		for i := uint32(0); i < s.Length; i = (i + 1) {
+		for i := uint32(0); i < n; i = (i + 1) {
 			result = result + string(s.Data[i])
 		}
 		return result
