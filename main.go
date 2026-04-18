@@ -974,7 +974,7 @@ func (m model) viewPlayer() string {
 				rows = append(rows,
 					row("Velocity", fmt.Sprintf("%.1f, %.1f", c.VelocityX, c.VelocityY)),
 					row("On Ground", boolStr(c.IsOnGround)),
-					row("Fly Time", fmt.Sprintf("%.1f", c.FlyTime)),
+					row("Fly Time", fmt.Sprintf("%.1f", c.FlyTimeMax)),
 				)
 			}
 			sections = append(sections, renderSection("Movement", rows))
@@ -1444,13 +1444,13 @@ func dmgMultsNonDefault(d *noita.DamageModelComponent) []string {
 		name string
 		val  float32
 	}{
-		{"Melee", d.DmgMultMelee}, {"Proj", d.DmgMultProjectile},
-		{"Expl", d.DmgMultExplosion}, {"Elec", d.DmgMultElectricity},
-		{"Fire", d.DmgMultFire}, {"Drill", d.DmgMultDrill},
-		{"Slice", d.DmgMultSlice}, {"Ice", d.DmgMultIce},
-		{"Heal", d.DmgMultHealing}, {"Phys", d.DmgMultPhysicsHit},
-		{"Rad", d.DmgMultRadioactive}, {"Poison", d.DmgMultPoison},
-		{"Holy", d.DmgMultHoly}, {"Curse", d.DmgMultCurse},
+		{"Melee", d.DamageMultipliersMelee}, {"Proj", d.DamageMultipliersProjectile},
+		{"Expl", d.DamageMultipliersExplosion}, {"Elec", d.DamageMultipliersElectricity},
+		{"Fire", d.DamageMultipliersFire}, {"Drill", d.DamageMultipliersDrill},
+		{"Slice", d.DamageMultipliersSlice}, {"Ice", d.DamageMultipliersIce},
+		{"Heal", d.DamageMultipliersHealing}, {"Phys", d.DamageMultipliersPhysicsHit},
+		{"Rad", d.DamageMultipliersRadioactive}, {"Poison", d.DamageMultipliersPoison},
+		{"Holy", d.DamageMultipliersHoly}, {"Curse", d.DamageMultipliersCurse},
 	}
 	var out []string
 	for _, m := range mults {

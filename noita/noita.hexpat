@@ -231,26 +231,32 @@ struct DamageModelComponent {
     double max_hp_cap;
     double max_hp_old;
 
-    // +0x68: unknown field (constant 0x0100FD84 across runs, NOT a multiplier)
-    u32 unknown_68              [[comment("Constant across runs — possibly a pointer or type info")]];
+    // +0x68: damage_multipliers sub-object (ConfigDamagesByType, 64 bytes).
+    // XML uses <damage_multipliers melee="..." ...>; game registers 15 fields
+    // in this order. The leading u32 is the sub-object's C++ vtable, which
+    // stays constant within a build (observed 0x0100FD84).
+    u32 damage_multipliers_vtable        [[comment("ConfigDamagesByType vtable")]];
 
-    // +0x6C: 16 damage multipliers (validated: 0.35=electricity, 1.5=material in dumps)
-    float dmg_mult_melee        [[color("FF8844")]];
-    float dmg_mult_projectile;
-    float dmg_mult_explosion;
-    float dmg_mult_electricity;
-    float dmg_mult_fire;
-    float dmg_mult_drill;
-    float dmg_mult_slice;
-    float dmg_mult_ice;
-    float dmg_mult_healing;
-    float dmg_mult_physics_hit;
-    float dmg_mult_radioactive;
-    float dmg_mult_poison;
-    float dmg_mult_holy;
-    float dmg_mult_curse;
-    float dmg_mult_overeating;
-    float dmg_mult_material;
+    // +0x6C: 15 damage multipliers (verified against player dump:
+    // explosion=0.35, holy=1.5 matches player XML's damage_multipliers)
+    float damage_multipliers_melee       [[color("FF8844")]];
+    float damage_multipliers_projectile;
+    float damage_multipliers_explosion;
+    float damage_multipliers_electricity;
+    float damage_multipliers_fire;
+    float damage_multipliers_drill;
+    float damage_multipliers_slice;
+    float damage_multipliers_ice;
+    float damage_multipliers_healing;
+    float damage_multipliers_physics_hit;
+    float damage_multipliers_radioactive;
+    float damage_multipliers_poison;
+    float damage_multipliers_overeating;
+    float damage_multipliers_curse;
+    float damage_multipliers_holy;
+
+    // +0xA8
+    float critical_damage_resistance    [[comment("0.0=full crit applied, 1.0=no crit applied")]];
 
     // +0xAC
     s32 invincibility_frames    [[comment("Frames of i-frames remaining")]];
@@ -287,7 +293,7 @@ struct CharacterDataComponent {
 
     // +0x88
     float gravity;
-    float fly_time;
+    float fly_time_max          [[comment("XML fly_time_max; actual LensValueFloat (12B), reading only the first float")]];
 
     // +0x90 to +0xB7
     padding[0x28];
@@ -581,8 +587,8 @@ struct GameGlobals {
 
     // +0x0C: Manager pointers
     WorldManagerViewRect *p_world_manager : u32 [[color("88FFAA"), comment("WorldManager*, 726 xrefs")]];
-    u32 p_chunk_system          [[color("88FFAA")]];
-    u32 p_cell_grid             [[color("88FFAA")]];
+    ChunkSystem *p_chunk_system : u32 [[color("88FFAA"), comment("Owns embedded CellGrid at +0x500")]];
+    u32 p_cell_grid             [[color("88FFAA"), comment("Different pointer than p_chunk_system->cell_grid; noita_hook uses the embedded one")]];
     CellFactory *p_cell_factory : u32 [[color("88FFAA")]];
     u32 unknown_1c;
     u32 p_physics_world         [[color("88FFAA")]];
@@ -605,12 +611,146 @@ struct GameGlobals {
 // =============================================================================
 // WorldManager (view rect at start)
 // =============================================================================
+//
+// pBackgroundGrid offset confirmed by LuaImpl_BiomeMapGetName @ 0x007c8f50
+// (assembly: MOV ECX,[EAX + 0xc] ; MOV ECX,[ECX + 0x48]).
 
 struct WorldManagerViewRect {
     float view_x                [[comment("View rect left edge (world coords)")]];
     float view_y                [[comment("View rect top edge")]];
     float view_width            [[comment("View rect width (world pixels)")]];
     float view_height           [[comment("View rect height")]];
+
+    // +0x10..+0x47: many sprite/scene pointers, not mapped here.
+    padding[0x38];
+
+    // +0x48: BackgroundGrid* — the biome chunk grid (NOT the cell chunk grid).
+    BiomeGrid *p_background_grid : u32 [[color("FFCC44"),
+        comment("BiomeGrid* — drives BiomeMapGetName / wobbled biome lookup")]];
+};
+
+// =============================================================================
+// Biome chunk grid — drives ChunkGrid_ResolveChunkAtPosition
+// (noita.exe @ 0x0087d9a0, the wobble).
+// Distinct from the cell chunk grid in ChunkSystem.
+// =============================================================================
+//
+// Resolution algorithm (ChunkGrid_ResolveChunkAtPosition @ 0x0087d9a0):
+//   shifted_x = wx + grid.x_shift     // x_shift = world_size_pixels / 2
+//   shifted_y = wy + grid.y_shift     // y_shift = 14 * 512 = BASE_Y
+//   chunk_cx  = floor(shifted_x / 512) mod grid.width    (clamped >=0)
+//   chunk_cy  = clamp(floor(shifted_y / 512), 0, grid.height-1)
+//   sub_x     = shifted_x mod 512
+//   sub_y     = shifted_y mod 512
+//   chunk     = chunks[chunk_cy * grid.width + chunk_cx]
+//   if chunk.wobble_eligible == 0 || chunk.force_original != 0: return chunk
+//   probe neighbors based on (sub_x,sub_y) thresholds 42 / 470 (0x2A / 0x1D6).
+//   first neighbor with a different chunk* triggers the wobble. otherwise
+//   return the original chunk (no wobble needed).
+//   if either side has wavy_edge==0: simplex-only offset.
+//   else: full sin/cos + simplex offset.
+//   resolved = chunks[(shifted_x + dx) >> 9][(shifted_y + dy) >> 9]
+//
+// For the 2025-01-25 build, grid is 70x48 in normal mode.
+
+struct BiomeChunk {
+    u32 vtable;                                                        // +0x00
+    u32 unknown_04;                                                    // +0x04
+    MsvcString biome_name       [[name("biomeName"),
+        comment("e.g. \"$biome_lake\", \"$biome_holymountain\"")]];   // +0x08..+0x1F
+
+    // +0x20..+0xC3: many fields (texture handles, biome XML data, etc.)
+    padding[0xA4];
+
+    // Edge-noise control bytes — read by ChunkGrid_ResolveChunkAtPosition
+    // (noita.exe @ 0x0087d9a0).
+    u8 wobble_eligible          [[name("wobbleEligible"),
+        comment("If 0, return original chunk (no wobble at all)")]];   // +0xC4
+    u8 wavy_edge                [[name("wavyEdge"),
+        comment("If 0 on either side of an edge, only simplex noise (no sin/cos wobble)")]]; // +0xC5
+    u8 force_original           [[name("forceOriginal"),
+        comment("If non-zero, short-circuit to original chunk")]];     // +0xC6
+    u8 unknown_C7;                                                     // +0xC7
+
+    // +0xC8..+0x2A3: more biome state (background sprite, music, etc.)
+    padding[0x1DC];
+
+    // +0x2A4: biome data pointer — non-NULL gates pixel-scene placement
+    // (PixelScene_PlaceEntryIfValid at noita.exe 0x0087d7e0 places only
+    // if this is non-null).
+    u32 biome_data_ptr          [[name("biomeDataPtr"),
+        comment("Pixel-scene placement gate (non-null => allowed)")]];  // +0x2A4
+
+    // +0x2A8..+0x2D7: more biome state (texture/audio handles, etc.)
+    padding[0x30];
+
+    // +0x2D8: XML path the biome was loaded from — e.g.
+    // "data/biomes/coalmine.xml", "data/biomes/tower_coalmine.xml".
+    // Populated by ProceduralTerrain_Init (noita.exe @ 0x0087a...) from the
+    // <BiomesToLoad> list in data/biomes/_pixel_scenes.xml. The allocation
+    // size (Biome_InitializeFromConfig @ 0x0086b9f0 does operator_new(0x2F0))
+    // places this string as the last member of the struct.
+    MsvcString xml_path         [[name("xmlPath"),
+        comment("Full XML file path, e.g. \"data/biomes/tower_coalmine.xml\"")]]; // +0x2D8..+0x2EF
+};
+
+// PixelSceneEntry — what `LoadPixelScene` queues. 0x90 bytes / entry.
+// Three MsvcStrings (materials filename, colors filename, background filename)
+// follow the position. The flag at +0x58 distinguishes background scenes.
+struct PixelSceneEntry {
+    u32 chunk_system_back_ref   [[comment("Back-pointer to ChunkSystem")]];   // +0x00
+    s32 x                       [[comment("World X (top-left)")]];            // +0x04
+    s32 y                       [[comment("World Y (top-left)")]];            // +0x08
+    MsvcString materials_filename [[name("materialsFile")]];                  // +0x0C..+0x23
+    MsvcString colors_filename    [[name("colorsFile")]];                     // +0x24..+0x3B
+    MsvcString background_filename [[name("backgroundFile")]];                // +0x3C..+0x53
+    padding[0x04];                                                            // +0x54..+0x57
+    // +0x58/+0x59 are the two boolean parameters threaded through
+    // `LoadPixelScene(... skip_biome_checks, skip_edge_textures, ...)` (see
+    // LuaImpl_LoadPixelScene). Names are best-guess from that signature; in
+    // dumps they don't perfectly correlate with which scenes look like
+    // backgrounds-only, so treat as raw opaque flags until further verified.
+    u8 flag_skip_biome_checks   [[name("flagSkipBiomeChecks")]];              // +0x58
+    u8 flag_skip_edge_textures  [[name("flagSkipEdgeTextures")]];             // +0x59
+    padding[0x36];                                                            // +0x5A..+0x8F
+};
+
+struct BiomeGrid {
+    // The biome grid object also owns the pixel scene queue at +0x00 and an
+    // alternate-scenes vector at +0x0C. Both are std::vector<PixelSceneEntry>
+    // (24 bytes each, stride 0x90).
+    u32 scenes_begin            [[name("scenesBegin"),
+        comment("PixelSceneEntry* — start of placed pixel scenes")]];   // +0x00
+    u32 scenes_end              [[name("scenesEnd")]];                  // +0x04
+    u32 scenes_capacity_end     [[name("scenesCapacityEnd")]];          // +0x08
+    u32 scenes_alt_begin        [[name("scenesAltBegin"),
+        comment("Second PixelSceneEntry vector (alt / background?)")]]; // +0x0C
+    u32 scenes_alt_end          [[name("scenesAltEnd")]];               // +0x10
+    u32 scenes_alt_capacity_end [[name("scenesAltCapacityEnd")]];       // +0x14
+
+    padding[0x20];                                                      // +0x18..+0x37
+
+    // +0x38: world->grid coordinate shift (added to input X before chunk indexing).
+    // Equals pixel-width / 2 of the biome map (e.g. 35*512 = 17920 normal).
+    double x_shift              [[name("xShift")]];                    // +0x38
+    // +0x40: Y shift, matches BASE_Y = 14*512 = 7168.
+    double y_shift              [[name("yShift")]];                    // +0x40
+
+    padding[0x08];                                                     // +0x48..+0x4F
+
+    s32 width                   [[comment("Grid width in chunks (70 normal, may differ NG+)")]];   // +0x50
+    s32 height                  [[comment("Grid height in chunks (48 normal)")]];                  // +0x54
+    s32 total_count             [[comment("width * height")]];                                     // +0x58
+    s32 unknown_5C;                                                    // +0x5C
+    u32 unknown_60;                                                    // +0x60
+    u32 unknown_64;                                                    // +0x64
+
+    // +0x68: chunks pointer — array of BiomeChunk* of size width*height,
+    // indexed as chunks[chunk_cy * width + chunk_cx].
+    u32 chunks_ptr              [[name("chunksPtr"),
+        color("FFCC44"),
+        comment("BiomeChunk*[width*height]")]];                        // +0x68
+    s32 chunks_count            [[name("chunksCount")]];               // +0x6C
 };
 
 // =============================================================================
@@ -632,22 +772,77 @@ struct MaterialInventoryComponent {
 };
 
 // =============================================================================
-// CellFactory / CellData — material name lookup
+// CellFactory / CellData — material lookup (names, colors, textures)
 // =============================================================================
+
+// CellTexture — per-material tile texture. Pointed to from CellData+0x88.
+// Pixel format is BGRA8 (byte order in memory: B, G, R, A per pixel).
+struct CellTexture {
+    s32 width                   [[comment("Texture width in pixels")]];
+    s32 height                  [[comment("Texture height in pixels")]];
+    u32 unknown_08;
+    u32 pixel_data_ptr          [[comment("u8[] BGRA8 pixels, size = width*height*4")]];
+};
 
 // CellData (0x290 bytes stride) — one per material type in CellFactory array
 struct CellData {
-    MsvcString name             [[comment("Material name string")]];
-    padding[0x278]              [[comment("Remaining CellData fields")]];
+    MsvcString name             [[comment("Material name string")]];  // +0x00..+0x17
+    padding[0x4C];                                                    // +0x18..+0x63
+    u32 fallback_color          [[comment("ARGB color used when texture_ptr is NULL")]];  // +0x64
+    padding[0x20];                                                    // +0x68..+0x87
+    CellTexture *texture_ptr : u32  [[comment("Per-material tile texture, or NULL")]];    // +0x88
+    padding[0x204];                                                   // +0x8C..+0x28F
 } [[static]];
 
-// CellFactory — only the fields we need for material name lookups
+// CellFactory — material table and per-material lookups
 struct CellFactory {
-    // +0x00 to +0x17: unknown
-    padding[0x18];
+    padding[0x18];                                                    // +0x00..+0x17
+    u32 cell_data_array_ptr     [[comment("CellData* — base of material array, stride 0x290")]];  // +0x18
+    padding[0x08];                                                    // +0x1C..+0x23
+    s32 material_count          [[comment("Number of materials in cell_data_array")]];  // +0x24
+    u32 material_0_color        [[comment("ARGB color for material ID 0")]];            // +0x28
+};
 
-    // +0x18: pointer to CellData array base
-    u32 cell_data_array_ptr     [[comment("CellData* — base of material array, stride 0x290")]];
+// =============================================================================
+// Chunk System / CellGrid — pixel-world storage (512x512 cells per chunk)
+// =============================================================================
+//
+// World→cell lookup (from CellGrid_GetCellPtr @ 0x0089c2d0):
+//   chunk_cx  = ((wx >> 9) - 0x100) & 0x1ff
+//   chunk_cy  = ((wy >> 9) - 0x100) & 0x1ff
+//   chunk_idx = chunk_cy * 0x200 + chunk_cx      // into chunk_table_ptr
+//   cell_idx  = (wy & 0x1ff) * 512 + (wx & 0x1ff) // into chunk->cell_slots_ptr
+//
+// A cell slot value of 0 means "air" (unloaded chunks also appear as air).
+// Non-NULL slots point to a polymorphic Cell* with a vtable at +0.
+
+// Chunk — heap-allocated, one per loaded 512x512 region.
+struct Chunk {
+    u32 cell_slots_ptr          [[comment("u32[512*512] — each slot is a Cell* (0 = air)")]];
+    // remaining fields (dirty rects, pixel_scene state, etc.) unmapped
+};
+
+// CellGrid — embedded in ChunkSystem at +0x500; also returned by ChunkSystem vtable[3].
+// The chunk table is 512x512 = 262144 Chunk* entries (1MB), not defined inline.
+struct CellGrid {
+    u32 vtable;
+    u32 unknown_04;
+    u32 chunk_table_ptr         [[comment("Chunk*[0x40000] — NULL entry = chunk not loaded")]];
+};
+
+// ChunkSystem — top-level owner of the cell grid. Pointed to by GameGlobals+0x10.
+// vtable[3] (slot offset 0x0C) returns the embedded CellGrid at +0x500.
+struct ChunkSystem {
+    u32 vtable;
+    padding[0x4FC];
+    CellGrid cell_grid          [[name("cellGrid"), comment("Embedded at +0x500 — same object as vtable[3]()")]];
+};
+
+// CellMaterialInfo — returned by Cell->vtable[12]() (__thiscall).
+// Only the material ID offset is mapped.
+struct CellMaterialInfo {
+    padding[0x30];
+    s32 material_id             [[comment("Index into CellFactory.cell_data_array_ptr")]];
 };
 
 // =============================================================================
@@ -760,6 +955,7 @@ enum TypeID : s32 {
 
 // Static globals (stable across all runs)
 u32 g_worldSeed              @ 0x01205004 [[color("AAFFAA"), comment("Current world seed (was incorrectly documented at 0x01206FE8)")]];
+s32 g_ngPlusCount            @ 0x01205024 [[color("AAFFAA"), comment("NG+ replay count, 0 on fresh run")]];
 s32 g_deathCount             @ 0x01208AF8 [[color("AAFFAA"), comment("Night sky stars")]];
 s32 g_numOrbsTotal           @ 0x01152544 [[color("AAFFAA"), comment("Total orb count (default 10)")]];
 EntityManager *g_entityManager : u32 @ 0x01204B98 [[color("44FF44")]];
