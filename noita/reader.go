@@ -6,9 +6,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
+	"path"
+	"strings"
 
 	"github.com/vitaminmoo/memtools/hexpat/runtime"
 )
+
 
 // CellData stride in the CellFactory material array.
 const cellDataStride = 0x290
@@ -19,6 +23,7 @@ type GameState struct {
 	Error     string
 
 	WorldSeed    uint32
+	NgPlusCount  int32
 	DeathCount   int32
 	NumOrbsTotal int32
 
@@ -94,6 +99,18 @@ type MaterialContent struct {
 	MaterialID int
 	Name       string
 	Amount     float64
+}
+
+// MaterialInfo is one entry from the CellFactory material table.
+type MaterialInfo struct {
+	ID            int
+	Name          string
+	FallbackColor uint32
+	TexturePtr    uint32
+	TexW          int32
+	TexH          int32
+	PixelDataPtr  uint32
+	Addr          uintptr
 }
 
 // InventoryItem wraps an AbilityComponent with its parent entity info.
@@ -205,6 +222,7 @@ func (r *Reader) ReadState() *GameState {
 		return gs
 	}
 
+	gs.NgPlusCount, _ = ReadGNgPlusCount(r.Ctx)
 	gs.DeathCount, _ = ReadGDeathCount(r.Ctx)
 	gs.NumOrbsTotal, _ = ReadGNumOrbsTotal(r.Ctx)
 
@@ -286,6 +304,685 @@ func (r *Reader) readMaterialName(matID int) string {
 		return fmt.Sprintf("mat_%d", matID)
 	}
 	return name
+}
+
+// ReadMaterials enumerates the CellFactory material table.
+func (r *Reader) ReadMaterials() []*MaterialInfo {
+	globals, _ := ReadGGameGlobals(r.Ctx)
+	if globals == nil {
+		return nil
+	}
+	cf, _ := globals.ReadPCellFactory(r.Ctx)
+	if cf == nil || cf.CellDataArrayPtr == 0 || cf.MaterialCount <= 0 {
+		return nil
+	}
+	count := int(cf.MaterialCount)
+	if count > 4096 {
+		count = 4096
+	}
+	out := make([]*MaterialInfo, 0, count)
+	for i := 0; i < count; i++ {
+		addr := uintptr(cf.CellDataArrayPtr) + uintptr(i)*cellDataStride
+		cd, _ := ReadCellData(r.Ctx, addr)
+		if cd == nil {
+			continue
+		}
+		mi := &MaterialInfo{
+			ID:            i,
+			Name:          cd.Name.FormatMsvcString(r.Ctx),
+			FallbackColor: cd.FallbackColor,
+			TexturePtr:    cd.TexturePtr,
+			Addr:          addr,
+		}
+		if cd.TexturePtr != 0 {
+			if tex, _ := ReadCellTexture(r.Ctx, uintptr(cd.TexturePtr)); tex != nil {
+				mi.TexW = tex.Width
+				mi.TexH = tex.Height
+				mi.PixelDataPtr = tex.PixelDataPtr
+			}
+		}
+		out = append(out, mi)
+	}
+	return out
+}
+
+// CellInfo describes a single pixel-world cell lookup result.
+type CellInfo struct {
+	WorldX, WorldY int32
+	ChunkCX        uint32
+	ChunkCY        uint32
+	ChunkIdx       uint32
+	ChunkPtr       uint32 // Chunk* (0 = unloaded/air)
+	CellSlotsPtr   uint32 // heap base of 512*512 Cell* slots
+	CellIdx        uint32
+	CellPtr        uint32 // Cell* (0 = air)
+}
+
+// ReadCellAt resolves a world-pixel coordinate to its chunk/cell pointers.
+// See noita.hexpat "Chunk System" for the address math.
+func (r *Reader) ReadCellAt(wx, wy int32) *CellInfo {
+	globals, _ := ReadGGameGlobals(r.Ctx)
+	if globals == nil || globals.PChunkSystem == 0 {
+		return nil
+	}
+	// CellGrid is embedded at ChunkSystem+0x500; chunk_table_ptr at +0x08.
+	chunkTablePtrAddr := int64(globals.PChunkSystem) + 0x500 + 0x08
+	chunkTablePtr, err := r.readU32(chunkTablePtrAddr)
+	if err != nil || chunkTablePtr == 0 {
+		return nil
+	}
+
+	chunkCx := uint32(((wx >> 9) - 0x100)) & 0x1FF
+	chunkCy := uint32(((wy >> 9) - 0x100)) & 0x1FF
+	chunkIdx := chunkCy*0x200 + chunkCx
+
+	info := &CellInfo{
+		WorldX: wx, WorldY: wy,
+		ChunkCX: chunkCx, ChunkCY: chunkCy, ChunkIdx: chunkIdx,
+	}
+	chunkPtr, err := r.readU32(int64(chunkTablePtr) + int64(chunkIdx)*4)
+	if err != nil {
+		return info
+	}
+	info.ChunkPtr = chunkPtr
+	if chunkPtr == 0 {
+		return info
+	}
+	chunk, _ := ReadChunk(r.Ctx, uintptr(chunkPtr))
+	if chunk == nil || chunk.CellSlotsPtr == 0 {
+		return info
+	}
+	info.CellSlotsPtr = chunk.CellSlotsPtr
+	info.CellIdx = uint32(wy&0x1FF)*512 + uint32(wx&0x1FF)
+	cellPtr, err := r.readU32(int64(chunk.CellSlotsPtr) + int64(info.CellIdx)*4)
+	if err == nil {
+		info.CellPtr = cellPtr
+	}
+	return info
+}
+
+// ChunkStats summarizes the loaded chunk table.
+type ChunkStats struct {
+	ChunkTablePtr uint32
+	TableEntries  int // always 0x40000
+	Loaded        int
+	MinCX, MinCY  uint32
+	MaxCX, MaxCY  uint32
+	Samples       []ChunkSample
+}
+
+// ChunkSample is one loaded-chunk record.
+type ChunkSample struct {
+	CX, CY   uint32
+	ChunkPtr uint32
+}
+
+// ReadChunkStats scans the chunk table and returns loaded-chunk statistics.
+// Up to `sampleLimit` chunk samples are included; pass 0 to disable sampling.
+func (r *Reader) ReadChunkStats(sampleLimit int) *ChunkStats {
+	globals, _ := ReadGGameGlobals(r.Ctx)
+	if globals == nil || globals.PChunkSystem == 0 {
+		return nil
+	}
+	chunkTablePtr, err := r.readU32(int64(globals.PChunkSystem) + 0x500 + 0x08)
+	if err != nil || chunkTablePtr == 0 {
+		return nil
+	}
+	const entries = 0x40000
+	buf := make([]byte, entries*4)
+	if _, err := r.Ctx.ReadAt(buf, int64(chunkTablePtr)); err != nil {
+		return nil
+	}
+	stats := &ChunkStats{
+		ChunkTablePtr: chunkTablePtr,
+		TableEntries:  entries,
+		MinCX:         0x1FF, MinCY: 0x1FF,
+	}
+	for i := 0; i < entries; i++ {
+		p := binary.LittleEndian.Uint32(buf[i*4:])
+		if p == 0 {
+			continue
+		}
+		cx := uint32(i) & 0x1FF
+		cy := uint32(i) >> 9
+		stats.Loaded++
+		if cx < stats.MinCX {
+			stats.MinCX = cx
+		}
+		if cx > stats.MaxCX {
+			stats.MaxCX = cx
+		}
+		if cy < stats.MinCY {
+			stats.MinCY = cy
+		}
+		if cy > stats.MaxCY {
+			stats.MaxCY = cy
+		}
+		if len(stats.Samples) < sampleLimit {
+			stats.Samples = append(stats.Samples, ChunkSample{CX: cx, CY: cy, ChunkPtr: p})
+		}
+	}
+	if stats.Loaded == 0 {
+		stats.MinCX, stats.MinCY = 0, 0
+	}
+	return stats
+}
+
+// =============================================================================
+// Biome chunk grid (the wobble lookup) — see noita.hexpat "Biome chunk grid".
+// =============================================================================
+
+// BiomeChunkInfo summarizes a single biome chunk's flags and data pointer.
+type BiomeChunkInfo struct {
+	CX            int32  `json:"cx"`
+	CY            int32  `json:"cy"`
+	Ptr           uint32 `json:"ptr"`
+	Name          string `json:"name"`
+	XmlName       string `json:"xmlName"`
+	WobbleEligibe bool   `json:"wobbleEligible"`
+	WavyEdge      bool   `json:"wavyEdge"`
+	ForceOriginal bool   `json:"forceOriginal"`
+	BiomeDataPtr  uint32 `json:"biomeDataPtr"`
+}
+
+// BiomeGridInfo describes the biome grid header.
+type BiomeGridInfo struct {
+	Ptr        uint32  `json:"ptr"`
+	Width      int32   `json:"width"`
+	Height     int32   `json:"height"`
+	XShift     float64 `json:"xShift"`
+	YShift     float64 `json:"yShift"`
+	ChunksPtr  uint32  `json:"chunksPtr"`
+	TotalCount int32   `json:"totalCount"`
+}
+
+// readBiomeGrid resolves the biome grid pointer from globals.
+// Returns nil if the world manager isn't set up yet.
+func (r *Reader) readBiomeGrid() (*BiomeGrid, uint32) {
+	globals, _ := ReadGGameGlobals(r.Ctx)
+	if globals == nil || globals.PWorldManager == 0 {
+		return nil, 0
+	}
+	wm, _ := ReadWorldManagerViewRect(r.Ctx, uintptr(globals.PWorldManager))
+	if wm == nil || wm.PBackgroundGrid == 0 {
+		return nil, 0
+	}
+	grid, _ := ReadBiomeGrid(r.Ctx, uintptr(wm.PBackgroundGrid))
+	return grid, wm.PBackgroundGrid
+}
+
+// ReadBiomeGridInfo returns the grid header (dimensions, shifts, chunks ptr).
+func (r *Reader) ReadBiomeGridInfo() *BiomeGridInfo {
+	grid, ptr := r.readBiomeGrid()
+	if grid == nil {
+		return nil
+	}
+	return &BiomeGridInfo{
+		Ptr:        ptr,
+		Width:      grid.Width,
+		Height:     grid.Height,
+		XShift:     grid.XShift,
+		YShift:     grid.YShift,
+		ChunksPtr:  grid.ChunksPtr,
+		TotalCount: grid.TotalCount,
+	}
+}
+
+// readBiomeChunkAtIdx reads one chunk pointer from the grid array and returns
+// its info. Returns nil if the slot is null.
+func (r *Reader) readBiomeChunkAtIdx(grid *BiomeGrid, cx, cy int32) *BiomeChunkInfo {
+	if grid == nil || grid.Width == 0 || grid.ChunksPtr == 0 {
+		return nil
+	}
+	if cx < 0 || cy < 0 || cx >= grid.Width || cy >= grid.Height {
+		return nil
+	}
+	idx := int64(cy)*int64(grid.Width) + int64(cx)
+	chunkPtr, err := r.readU32(int64(grid.ChunksPtr) + idx*4)
+	if err != nil || chunkPtr == 0 {
+		return nil
+	}
+	return r.readBiomeChunk(uintptr(chunkPtr), cx, cy)
+}
+
+func (r *Reader) readBiomeChunk(addr uintptr, cx, cy int32) *BiomeChunkInfo {
+	bc, _ := ReadBiomeChunk(r.Ctx, addr)
+	if bc == nil {
+		return nil
+	}
+	return &BiomeChunkInfo{
+		CX: cx, CY: cy,
+		Ptr:           uint32(addr),
+		Name:          bc.BiomeName.FormatMsvcString(r.Ctx),
+		XmlName:       stripBiomeXMLPath(bc.XmlPath.FormatMsvcString(r.Ctx)),
+		WobbleEligibe: bc.WobbleEligible != 0,
+		WavyEdge:      bc.WavyEdge != 0,
+		ForceOriginal: bc.ForceOriginal != 0,
+		BiomeDataPtr:  bc.BiomeDataPtr,
+	}
+}
+
+// stripBiomeXMLPath turns "data/biomes/tower_coalmine.xml" into "tower_coalmine".
+// Empty input returns empty. Uses path.Base (forward slashes) since Noita
+// stores these paths with forward slashes regardless of host OS.
+func stripBiomeXMLPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	return strings.TrimSuffix(path.Base(p), ".xml")
+}
+
+// ReadBiomeChunk returns the chunk at grid coords (cx, cy), or nil if empty.
+func (r *Reader) ReadBiomeChunkInfo(cx, cy int32) *BiomeChunkInfo {
+	grid, _ := r.readBiomeGrid()
+	if grid == nil {
+		return nil
+	}
+	return r.readBiomeChunkAtIdx(grid, cx, cy)
+}
+
+// BiomeAtResult is what `biome-at` returns: original chunk + final (post-wobble)
+// chunk + the actual decision path the binary took.
+type BiomeAtResult struct {
+	WX          int32           `json:"wx"`
+	WY          int32           `json:"wy"`
+	GridWidth   int32           `json:"gridWidth"`
+	GridHeight  int32           `json:"gridHeight"`
+	XShift      float64         `json:"xShift"`
+	YShift      float64         `json:"yShift"`
+	OrigCX      int32           `json:"origCX"`
+	OrigCY      int32           `json:"origCY"`
+	SubX        int32           `json:"subX"`
+	SubY        int32           `json:"subY"`
+	Original    *BiomeChunkInfo `json:"original,omitempty"`
+	Resolved    *BiomeChunkInfo `json:"resolved,omitempty"`
+	Wobbled     bool            `json:"wobbled"`
+	WobbleType  string          `json:"wobbleType"`
+	NeighborDir string          `json:"neighborDir,omitempty"`
+	NeighborCX  int32           `json:"neighborCX,omitempty"`
+	NeighborCY  int32           `json:"neighborCY,omitempty"`
+	WobbleDX    float64         `json:"wobbleDX,omitempty"`
+	WobbleDY    float64         `json:"wobbleDY,omitempty"`
+}
+
+// ResolveBiomeAt mirrors ChunkGrid_ResolveChunkAtPosition (Noita @ 0x0087d9a0):
+// it returns Noita's resolved biome chunk for a world coordinate, including
+// the wobble decision (skipped, simplex-only, sin-cos+simplex) and which
+// neighbor (if any) triggered the wobble.
+func (r *Reader) ResolveBiomeAt(wx, wy int32) *BiomeAtResult {
+	grid, _ := r.readBiomeGrid()
+	if grid == nil {
+		return nil
+	}
+	res := &BiomeAtResult{
+		WX: wx, WY: wy,
+		GridWidth: grid.Width, GridHeight: grid.Height,
+		XShift: grid.XShift, YShift: grid.YShift,
+		WobbleType: "none",
+	}
+
+	// Match the binary's coordinate math (uses doubles internally).
+	sx := float64(wx) + grid.XShift
+	sy := float64(wy) + grid.YShift
+	res.SubX = int32(int64(sx) & 0x1FF)
+	res.SubY = int32(int64(sy) & 0x1FF)
+
+	cx := int32(int64(sx)>>9) % grid.Width
+	if cx < 0 {
+		cx += grid.Width
+	}
+	cy := int32(int64(sy) >> 9)
+	if cy >= grid.Height {
+		cy = grid.Height - 1
+	}
+	if cy < 0 {
+		cy = 0
+	}
+	res.OrigCX, res.OrigCY = cx, cy
+
+	orig := r.readBiomeChunkAtIdx(grid, cx, cy)
+	res.Original = orig
+	res.Resolved = orig
+	if orig == nil {
+		return res
+	}
+
+	// Short-circuits matching the binary's first two checks.
+	if !orig.WobbleEligibe || orig.ForceOriginal {
+		res.WobbleType = "skipped-flags"
+		return res
+	}
+
+	// Find the first neighbor with a different chunk pointer, in the same
+	// order the binary probes (left, top, right, bottom, then NW/SW only if
+	// sub_x<42, then NE/SE in their respective corners).
+	type cand struct {
+		dir    string
+		cx, cy int32
+	}
+	subX, subY := res.SubX, res.SubY
+	var probes []cand
+	if subX < 0x2A {
+		probes = append(probes, cand{"left", cx - 1, cy})
+	}
+	if subY < 0x2A {
+		probes = append(probes, cand{"top", cx, cy - 1})
+	}
+	if subX > 0x1D6 {
+		probes = append(probes, cand{"right", cx + 1, cy})
+	}
+	if subY > 0x1D6 {
+		probes = append(probes, cand{"bottom", cx, cy + 1})
+	}
+	if subX < 0x2A {
+		if subY < 0x2A {
+			probes = append(probes, cand{"top-left", cx - 1, cy - 1})
+		}
+		if subY > 0x1D6 {
+			probes = append(probes, cand{"bottom-left", cx - 1, cy + 1})
+		}
+	}
+	if subX > 0x1D6 {
+		if subY < 0x2A {
+			probes = append(probes, cand{"top-right", cx + 1, cy - 1})
+		}
+		if subY > 0x1D6 {
+			probes = append(probes, cand{"bottom-right", cx + 1, cy + 1})
+		}
+	}
+
+	var neighbor *BiomeChunkInfo
+	for _, c := range probes {
+		ncx, ncy := wrapCX(c.cx, grid.Width), clampCY(c.cy, grid.Height)
+		ne := r.readBiomeChunkAtIdx(grid, ncx, ncy)
+		if ne == nil || ne.Ptr == orig.Ptr {
+			continue
+		}
+		neighbor = ne
+		res.NeighborDir = c.dir
+		res.NeighborCX, res.NeighborCY = ncx, ncy
+		break
+	}
+	if neighbor == nil {
+		res.WobbleType = "no-differing-neighbor"
+		return res
+	}
+	if !neighbor.WobbleEligibe {
+		res.WobbleType = "skipped-flags"
+		return res
+	}
+
+	// Wobble math from ChunkGrid_ResolveChunkAtPosition (noita.exe @
+	// 0x0087d9a0; this branch starts at LAB_0087dc01 inside it).
+	//   simplex_val = simplex(sx*0.05, sy*0.05) * 70
+	//   simplex-only (either side wavy_edge=0):
+	//       dx = dy = simplex_val * 2.5
+	//   sin-cos + simplex (both wavy):
+	//       dx = cos(sx*0.005)*30 + simplex_val*11
+	//       dy = sin(sy*0.005)*30 + simplex_val*11
+	var dx, dy float64
+	simplexVal := computeSimplex2D(sx*0.05, sy*0.05) * 70.0
+	if !orig.WavyEdge || !neighbor.WavyEdge {
+		dx = simplexVal * 2.5
+		dy = dx
+		res.WobbleType = "simplex-only"
+	} else {
+		dx = math.Cos(sx*0.005)*30.0 + simplexVal*11.0
+		dy = math.Sin(sy*0.005)*30.0 + simplexVal*11.0
+		res.WobbleType = "sin-cos+simplex"
+	}
+	res.WobbleDX = dx
+	res.WobbleDY = dy
+	res.Wobbled = true
+
+	// The binary swaps X/Y wobble in the chunk lookup — X chunk index uses
+	// (Y_wobble + sx), Y uses (X_wobble + sy). See
+	// `BiomeGrid_GetChunkAt (noita.exe @ 0x0087d870):
+	// (grid, (dVar10+dVar13)>>9, (dVar12+dVar9)>>9)` where dVar10 is the
+	// sin/y branch and dVar12 is the cos/x branch.
+	wcx := wrapCX(int32(int64(math.Floor(sx+dy))>>9), grid.Width)
+	wcy := clampCY(int32(int64(math.Floor(sy+dx))>>9), grid.Height)
+	wobbled := r.readBiomeChunkAtIdx(grid, wcx, wcy)
+	// Only adopt the wobbled chunk if it exists and is wobble-eligible.
+	if wobbled != nil && wobbled.WobbleEligibe {
+		res.Resolved = wobbled
+	}
+	return res
+}
+
+// computeSimplex2D is the 2D simplex noise helper from
+// ChunkGrid_ResolveChunkAtPosition (noita.exe @ 0x0087d9a0). Returned
+// value is the raw simplex contribution before amplitude scaling.
+func computeSimplex2D(x, y float64) float64 {
+	sqrt312 := (math.Sqrt(3) - 1) / 2
+	sqrt336 := (3 - math.Sqrt(3)) / 6
+
+	// edge noise tables (the static 256-byte permutation + the *0xC mod
+	// table). Initialized lazily on first call.
+	if edgeNoise2 == nil {
+		edgeNoise2 = make([]int32, 512)
+		edgeNoiseM12 = make([]int32, 512)
+		for i := 0; i < 512; i++ {
+			t := int32(edgeNoiseRaw[i&0xff])
+			edgeNoise2[i] = t
+			edgeNoiseM12[i] = t % 0xC
+		}
+	}
+
+	dVar7 := (x + y) * sqrt312
+	dVar6a := dVar7 + x
+	uVar2 := uint32(dVar6a)
+	if dVar6a < float64(uVar2) {
+		uVar2--
+	}
+	dVar7 = dVar7 + y
+	uVar1 := uint32(dVar7)
+	if dVar7 < float64(uVar1) {
+		uVar1--
+	}
+	dVar6 := float64(uVar1+uVar2) * sqrt336
+	dVar10 := x - (float64(uVar2) - dVar6)
+	dVar9 := y - (float64(uVar1) - dVar6)
+	uVar1 &= 0xff
+	uVar2 &= 0xff
+	bIfDVar9LtDVar10 := int32(0)
+	if dVar9 < dVar10 {
+		bIfDVar9LtDVar10 = 1
+	}
+	bIfDVar10LeDVar9 := int32(0)
+	if dVar10 <= dVar9 {
+		bIfDVar10LeDVar9 = 1
+	}
+	dVar7b := (dVar10 - float64(bIfDVar9LtDVar10)) + sqrt336
+	dVar3 := (dVar9 - float64(bIfDVar10LeDVar9)) + sqrt336
+	dVar11 := (dVar10 - 1) + sqrt336*2
+	dVar4 := (dVar9 - 1) + sqrt336*2
+
+	dVar5 := 0.5 - dVar10*dVar10 - dVar9*dVar9
+	var part1, part2, part3 float64
+	if dVar5 >= 0 {
+		idx := edgeNoiseM12[edgeNoise2[uVar1]+int32(uVar2)] * 4
+		part1 = (float64(edgeSigns[idx+1])*dVar9 + float64(edgeSigns[idx])*dVar10) *
+			dVar5 * dVar5 * dVar5 * dVar5
+	}
+	dVar5 = 0.5 - dVar7b*dVar7b - dVar3*dVar3
+	if dVar5 >= 0 {
+		idx := edgeNoiseM12[edgeNoise2[int32(uVar1)+bIfDVar10LeDVar9]+int32(uVar2)+bIfDVar9LtDVar10] * 4
+		part2 = (float64(edgeSigns[idx+1])*dVar3 + float64(edgeSigns[idx])*dVar7b) *
+			dVar5 * dVar5 * dVar5 * dVar5
+	}
+	dVar3a := 0.5 - dVar11*dVar11 - dVar4*dVar4
+	if dVar3a >= 0 {
+		idx := edgeNoiseM12[edgeNoise2[int32(uVar1)+1]+int32(uVar2)+1] * 4
+		part3 = (float64(edgeSigns[idx+1])*dVar4 + float64(edgeSigns[idx])*dVar11) *
+			dVar3a * dVar3a * dVar3a * dVar3a
+	}
+	return part1 + part2 + part3
+}
+
+var (
+	edgeNoise2   []int32
+	edgeNoiseM12 []int32
+)
+
+var edgeNoiseRaw = [256]uint8{
+	0x97, 0xa0, 0x89, 0x5b, 0x5a, 0x0f, 0x83, 0x0d, 0xc9, 0x5f, 0x60, 0x35, 0xc2, 0xe9, 0x07, 0xe1,
+	0x8c, 0x24, 0x67, 0x1e, 0x45, 0x8e, 0x08, 0x63, 0x25, 0xf0, 0x15, 0x0a, 0x17, 0xbe, 0x06, 0x94,
+	0xf7, 0x78, 0xea, 0x4b, 0x00, 0x1a, 0xc5, 0x3e, 0x5e, 0xfc, 0xdb, 0xcb, 0x75, 0x23, 0x0b, 0x20,
+	0x39, 0xb1, 0x21, 0x58, 0xed, 0x95, 0x38, 0x57, 0xae, 0x14, 0x7d, 0x88, 0xab, 0xa8, 0x44, 0xaf,
+	0x4a, 0xa5, 0x47, 0x86, 0x8b, 0x30, 0x1b, 0xa6, 0x4d, 0x92, 0x9e, 0xe7, 0x53, 0x6f, 0xe5, 0x7a,
+	0x3c, 0xd3, 0x85, 0xe6, 0xdc, 0x69, 0x5c, 0x29, 0x37, 0x2e, 0xf5, 0x28, 0xf4, 0x66, 0x8f, 0x36,
+	0x41, 0x19, 0x3f, 0xa1, 0x01, 0xd8, 0x50, 0x49, 0xd1, 0x4c, 0x84, 0xbb, 0xd0, 0x59, 0x12, 0xa9,
+	0xc8, 0xc4, 0x87, 0x82, 0x74, 0xbc, 0x9f, 0x56, 0xa4, 0x64, 0x6d, 0xc6, 0xad, 0xba, 0x03, 0x40,
+	0x34, 0xd9, 0xe2, 0xfa, 0x7c, 0x7b, 0x05, 0xca, 0x26, 0x93, 0x76, 0x7e, 0xff, 0x52, 0x55, 0xd4,
+	0xcf, 0xce, 0x3b, 0xe3, 0x2f, 0x10, 0x3a, 0x11, 0xb6, 0xbd, 0x1c, 0x2a, 0xdf, 0xb7, 0xaa, 0xd5,
+	0x77, 0xf8, 0x98, 0x02, 0x2c, 0x9a, 0xa3, 0x46, 0xdd, 0x99, 0x65, 0x9b, 0xa7, 0x2b, 0xac, 0x09,
+	0x81, 0x16, 0x27, 0xfd, 0x13, 0x62, 0x6c, 0x6e, 0x4f, 0x71, 0xe0, 0xe8, 0xb2, 0xb9, 0x70, 0x68,
+	0xda, 0xf6, 0x61, 0xe4, 0xfb, 0x22, 0xf2, 0xc1, 0xee, 0xd2, 0x90, 0x0c, 0xbf, 0xb3, 0xa2, 0xf1,
+	0x51, 0x33, 0x91, 0xeb, 0xf9, 0x0e, 0xef, 0x6b, 0x31, 0xc0, 0xd6, 0x1f, 0xb5, 0xc7, 0x6a, 0x9d,
+	0xb8, 0x54, 0xcc, 0xb0, 0x73, 0x79, 0x32, 0x2d, 0x7f, 0x04, 0x96, 0xfe, 0x8a, 0xec, 0xcd, 0x5d,
+	0xde, 0x72, 0x43, 0x1d, 0x18, 0x48, 0xf3, 0x8d, 0x80, 0xc3, 0x4e, 0x42, 0xd7, 0x3d, 0x9c, 0xb4,
+}
+
+var edgeSigns = [48]int32{
+	1, 1, 0, 0, -1, 1, 0, 0, 1, -1, 0, 0, -1, -1, 0, 0,
+	1, 0, 1, 0, -1, 0, 1, 0, 1, 0, -1, 0, -1, 0, -1, 0,
+	0, 1, 1, 0, 0, -1, 1, 0, 0, 1, -1, 0, 0, -1, -1, 0,
+}
+
+// PixelSceneInfo is one queued/placed pixel scene from noita's runtime.
+type PixelSceneInfo struct {
+	X                  int32  `json:"x"`
+	Y                  int32  `json:"y"`
+	MaterialsFile      string `json:"materialsFile"`
+	ColorsFile         string `json:"colorsFile"`
+	BackgroundFile     string `json:"backgroundFile,omitempty"`
+	FlagSkipBiomeCheck bool   `json:"flagSkipBiomeChecks,omitempty"`
+	FlagSkipEdgeTex    bool   `json:"flagSkipEdgeTextures,omitempty"`
+	Index              int32  `json:"index"`
+	Vec                string `json:"vec"` // "main" or "alt"
+}
+
+// iteratePixelSceneVec walks one of the two PixelSceneEntry vectors that
+// live inside BiomeGrid.
+func (r *Reader) iteratePixelSceneVec(begin, end uint32, vecName string, fn func(*PixelSceneInfo) bool) {
+	if begin == 0 || end <= begin {
+		return
+	}
+	const stride = 0x90
+	count := int((end - begin) / stride)
+	if count <= 0 || count > 1<<20 {
+		return
+	}
+	buf := make([]byte, count*stride)
+	if _, err := r.Ctx.ReadAt(buf, int64(begin)); err != nil {
+		return
+	}
+	for i := 0; i < count; i++ {
+		base := i * stride
+		x := int32(binary.LittleEndian.Uint32(buf[base+0x04:]))
+		y := int32(binary.LittleEndian.Uint32(buf[base+0x08:]))
+		mat, _ := ReadMsvcString(r.Ctx, uintptr(int64(begin)+int64(base)+0x0C))
+		col, _ := ReadMsvcString(r.Ctx, uintptr(int64(begin)+int64(base)+0x24))
+		bg, _ := ReadMsvcString(r.Ctx, uintptr(int64(begin)+int64(base)+0x3C))
+		info := &PixelSceneInfo{
+			X: x, Y: y,
+			Index: int32(i),
+			Vec:   vecName,
+		}
+		if mat != nil {
+			info.MaterialsFile = mat.FormatMsvcString(r.Ctx)
+		}
+		if col != nil {
+			info.ColorsFile = col.FormatMsvcString(r.Ctx)
+		}
+		if bg != nil {
+			info.BackgroundFile = bg.FormatMsvcString(r.Ctx)
+		}
+		info.FlagSkipBiomeCheck = buf[base+0x58] != 0
+		info.FlagSkipEdgeTex = buf[base+0x59] != 0
+		if !fn(info) {
+			return
+		}
+	}
+}
+
+// IteratePixelScenes walks both pixel-scene vectors in BiomeGrid (the "main"
+// queue used by procedural Lua placements and the "alt" / background queue).
+// fn may return false to stop iteration.
+func (r *Reader) IteratePixelScenes(fn func(*PixelSceneInfo) bool) {
+	grid, _ := r.readBiomeGrid()
+	if grid == nil {
+		return
+	}
+	stop := false
+	r.iteratePixelSceneVec(grid.ScenesBegin, grid.ScenesEnd, "main", func(p *PixelSceneInfo) bool {
+		if !fn(p) {
+			stop = true
+			return false
+		}
+		return true
+	})
+	if stop {
+		return
+	}
+	r.iteratePixelSceneVec(grid.ScenesAltBegin, grid.ScenesAltEnd, "alt", fn)
+}
+
+// IterateBiomeChunks calls fn for every non-null chunk in the biome grid.
+// fn receives the chunk info and may return false to stop iteration.
+func (r *Reader) IterateBiomeChunks(fn func(*BiomeChunkInfo) bool) {
+	grid, _ := r.readBiomeGrid()
+	if grid == nil || grid.ChunksPtr == 0 || grid.Width == 0 {
+		return
+	}
+	total := int(grid.Width) * int(grid.Height)
+	if total <= 0 {
+		return
+	}
+	buf := make([]byte, total*4)
+	if _, err := r.Ctx.ReadAt(buf, int64(grid.ChunksPtr)); err != nil {
+		return
+	}
+	for i := 0; i < total; i++ {
+		p := binary.LittleEndian.Uint32(buf[i*4:])
+		if p == 0 {
+			continue
+		}
+		cx := int32(i % int(grid.Width))
+		cy := int32(i / int(grid.Width))
+		info := r.readBiomeChunk(uintptr(p), cx, cy)
+		if info == nil {
+			continue
+		}
+		if !fn(info) {
+			return
+		}
+	}
+}
+
+func wrapCX(cx, width int32) int32 {
+	if width <= 0 {
+		return 0
+	}
+	cx = cx % width
+	if cx < 0 {
+		cx += width
+	}
+	return cx
+}
+
+func clampCY(cy, height int32) int32 {
+	if height <= 0 {
+		return 0
+	}
+	if cy < 0 {
+		return 0
+	}
+	if cy > height-1 {
+		return height - 1
+	}
+	return cy
 }
 
 // readPotionContents reads MaterialInventoryComponent for an entity and returns non-zero materials.
