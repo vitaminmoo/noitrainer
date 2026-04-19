@@ -182,6 +182,32 @@ func indentHexDumpRT(buf []byte, base uint32) string {
 	return out.String()
 }
 
+type biomeChunkInput struct {
+	CX int32 `json:"cx"`
+	CY int32 `json:"cy"`
+}
+type biomeAtInput struct {
+	WX int32 `json:"wx"`
+	WY int32 `json:"wy"`
+}
+type biomeDumpInput struct {
+	Filter string `json:"filter,omitempty" jsonschema:"optional substring match on biome name"`
+}
+type coord struct {
+	WX int32 `json:"wx"`
+	WY int32 `json:"wy"`
+}
+type biomeAtManyInput struct {
+	Coords []coord `json:"coords" jsonschema:"list of world-pixel coordinates"`
+}
+
+func boolToIntRT(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // registerRuntimeTools registers every runtime introspection tool.
 // Implementations are added in subsequent plan tasks.
 func registerRuntimeTools(s *mcp.Server) {
@@ -811,5 +837,186 @@ func registerRuntimeTools(s *mcp.Server) {
 			}
 		}
 		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "biome_grid",
+		Description: "JSON: biome chunk grid header (width, height, shifts, chunks_ptr) with loaded-chunk count.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		g := reader.ReadBiomeGridInfo()
+		if g == nil {
+			return toolErr(fmt.Errorf("biome grid unavailable (WorldManager.pBackgroundGrid is null)"))
+		}
+		loaded := 0
+		reader.IterateBiomeChunks(func(*noita.BiomeChunkInfo) bool { loaded++; return true })
+		data, err := json.Marshal(struct {
+			*noita.BiomeGridInfo
+			Loaded int `json:"loaded"`
+		}{g, loaded})
+		if err != nil {
+			return toolErr(err)
+		}
+		return textResult(string(data)), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "biome_chunk",
+		Description: "JSON: metadata for the biome chunk at (cx, cy). Returns null if not loaded.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in biomeChunkInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		c := reader.ReadBiomeChunkInfo(in.CX, in.CY)
+		data, err := json.Marshal(c)
+		if err != nil {
+			return toolErr(err)
+		}
+		return textResult(string(data)), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "biome_at",
+		Description: "JSON: resolve a world-pixel coordinate to its biome (original + wobble-resolved).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in biomeAtInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		if reader.ReadBiomeGridInfo() == nil {
+			return toolErr(fmt.Errorf("biome grid unavailable"))
+		}
+		res := reader.ResolveBiomeAt(in.WX, in.WY)
+		data, err := json.Marshal(res)
+		if err != nil {
+			return toolErr(err)
+		}
+		return textResult(string(data)), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "biome_dump",
+		Description: "List every loaded biome chunk; optional name substring filter.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in biomeDumpInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		g := reader.ReadBiomeGridInfo()
+		if g == nil {
+			return toolErr(fmt.Errorf("biome grid unavailable"))
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "# BiomeGrid %dx%d (shift=%g,%g) chunks_ptr=0x%08X\n",
+			g.Width, g.Height, g.XShift, g.YShift, g.ChunksPtr)
+		fmt.Fprintf(&b, "# %-3s %-3s %-10s %-10s %-32s %s\n",
+			"cx", "cy", "ChunkPtr", "BiomeData", "Name", "Flags(eligible/wavy/forced)")
+		count := 0
+		filterLower := strings.ToLower(in.Filter)
+		reader.IterateBiomeChunks(func(c *noita.BiomeChunkInfo) bool {
+			if in.Filter != "" && !strings.Contains(strings.ToLower(c.Name), filterLower) {
+				return true
+			}
+			fmt.Fprintf(&b, "  %-3d %-3d 0x%08X 0x%08X %-32s e=%d w=%d f=%d\n",
+				c.CX, c.CY, c.Ptr, c.BiomeDataPtr, truncateStr(c.Name, 31),
+				boolToIntRT(c.WobbleEligibe), boolToIntRT(c.WavyEdge), boolToIntRT(c.ForceOriginal))
+			count++
+			return true
+		})
+		fmt.Fprintf(&b, "\n%d chunks shown\n", count)
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "biome_flags",
+		Description: "JSON array: one entry per loaded biome chunk with a real name (cx, cy, name, xmlName, ptrs, wobble flags).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		if reader.ReadBiomeGridInfo() == nil {
+			return toolErr(fmt.Errorf("biome grid unavailable"))
+		}
+		type row struct {
+			CX             int32  `json:"cx"`
+			CY             int32  `json:"cy"`
+			Name           string `json:"name"`
+			XmlName        string `json:"xmlName"`
+			Ptr            string `json:"ptr"`
+			BiomeDataPtr   string `json:"biomeDataPtr"`
+			WobbleEligible bool   `json:"wobbleEligible"`
+			WavyEdge       bool   `json:"wavyEdge"`
+			ForceOriginal  bool   `json:"forceOriginal"`
+		}
+		out := make([]row, 0)
+		reader.IterateBiomeChunks(func(c *noita.BiomeChunkInfo) bool {
+			if c.Name == "_EMPTY_" || c.Name == "???" || c.Name == "" {
+				return true
+			}
+			out = append(out, row{
+				CX: c.CX, CY: c.CY, Name: c.Name, XmlName: c.XmlName,
+				Ptr:            fmt.Sprintf("0x%08x", c.Ptr),
+				BiomeDataPtr:   fmt.Sprintf("0x%08x", c.BiomeDataPtr),
+				WobbleEligible: c.WobbleEligibe,
+				WavyEdge:       c.WavyEdge,
+				ForceOriginal:  c.ForceOriginal,
+			})
+			return true
+		})
+		data, err := json.Marshal(out)
+		if err != nil {
+			return toolErr(err)
+		}
+		return textResult(string(data)), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "biome_at_many",
+		Description: "Resolve biomes at many world-pixel coordinates; returns a JSON array of BiomeAtResult objects in input order.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in biomeAtManyInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		if reader.ReadBiomeGridInfo() == nil {
+			return toolErr(fmt.Errorf("biome grid unavailable"))
+		}
+		out := make([]*noita.BiomeAtResult, 0, len(in.Coords))
+		for _, c := range in.Coords {
+			out = append(out, reader.ResolveBiomeAt(c.WX, c.WY))
+		}
+		data, err := json.Marshal(out)
+		if err != nil {
+			return toolErr(err)
+		}
+		return textResult(string(data)), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "pixel_scenes",
+		Description: "JSON array: every BiomeGrid pixel-scene entry currently placed/queued by the running game.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		if reader.ReadBiomeGridInfo() == nil {
+			return toolErr(fmt.Errorf("biome grid unavailable"))
+		}
+		out := make([]*noita.PixelSceneInfo, 0)
+		reader.IteratePixelScenes(func(p *noita.PixelSceneInfo) bool {
+			out = append(out, p)
+			return true
+		})
+		data, err := json.Marshal(out)
+		if err != nil {
+			return toolErr(err)
+		}
+		return textResult(string(data)), nil, nil
 	})
 }
