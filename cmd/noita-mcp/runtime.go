@@ -5,9 +5,11 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -206,6 +208,19 @@ func boolToIntRT(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+type peekInput struct {
+	Addr string `json:"addr" jsonschema:"address, decimal or 0x-prefixed hex"`
+	Size int    `json:"size,omitempty" jsonschema:"bytes to dump (default 128)"`
+}
+type derefInput struct {
+	Addr string `json:"addr" jsonschema:"address of a u32 pointer to dereference"`
+	Size int    `json:"size,omitempty" jsonschema:"bytes to dump at the pointee (default 128)"`
+}
+type readMemInput struct {
+	Type string `json:"type" jsonschema:"u8|u16|u32|u64|s32|f32|f64|str|ptr"`
+	Addr string `json:"addr"`
 }
 
 // registerRuntimeTools registers every runtime introspection tool.
@@ -1018,5 +1033,149 @@ func registerRuntimeTools(s *mcp.Server) {
 			return toolErr(err)
 		}
 		return textResult(string(data)), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "peek",
+		Description: "Hex-dump arbitrary virtual memory at addr. size defaults to 128.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in peekInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		addr, err := parseRuntimeAddr(in.Addr)
+		if err != nil {
+			return toolErr(err)
+		}
+		size := in.Size
+		if size <= 0 {
+			size = 128
+		}
+		buf := make([]byte, size)
+		n, err := reader.Ctx.ReadAt(buf, int64(addr))
+		if err != nil {
+			return toolErr(fmt.Errorf("read at 0x%08X: %w", addr, err))
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "0x%08X, %d bytes:\n\n%s", addr, n, indentHexDumpRT(buf[:n], addr))
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "deref",
+		Description: "Read a u32 pointer at addr and hex-dump memory at the pointee. size defaults to 128.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in derefInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		addr, err := parseRuntimeAddr(in.Addr)
+		if err != nil {
+			return toolErr(err)
+		}
+		size := in.Size
+		if size <= 0 {
+			size = 128
+		}
+		var p [4]byte
+		if _, err := reader.Ctx.ReadAt(p[:], int64(addr)); err != nil {
+			return toolErr(fmt.Errorf("read ptr at 0x%08X: %w", addr, err))
+		}
+		target := binary.LittleEndian.Uint32(p[:])
+		var b strings.Builder
+		fmt.Fprintf(&b, "*(u32*)0x%08X = 0x%08X\n\n", addr, target)
+		if target == 0 {
+			b.WriteString("(null pointer)\n")
+			return textResult(b.String()), nil, nil
+		}
+		buf := make([]byte, size)
+		n, err := reader.Ctx.ReadAt(buf, int64(target))
+		if err != nil {
+			return toolErr(fmt.Errorf("read at target 0x%08X: %w", target, err))
+		}
+		fmt.Fprintf(&b, "0x%08X, %d bytes:\n\n%s", target, n, indentHexDumpRT(buf[:n], target))
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "read_memory",
+		Description: "Read a typed value at addr. type is one of: u8, u16, u32, u64, s32, f32, f64, str, ptr.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in readMemInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		addr, err := parseRuntimeAddr(in.Addr)
+		if err != nil {
+			return toolErr(err)
+		}
+		read := func(n int) ([]byte, error) {
+			buf := make([]byte, n)
+			if _, err := reader.Ctx.ReadAt(buf, int64(addr)); err != nil {
+				return nil, fmt.Errorf("read at 0x%08X: %w", addr, err)
+			}
+			return buf, nil
+		}
+		var b strings.Builder
+		switch strings.ToLower(in.Type) {
+		case "u8":
+			buf, err := read(1)
+			if err != nil {
+				return toolErr(err)
+			}
+			fmt.Fprintf(&b, "u8  @ 0x%08X = %d (0x%02X)\n", addr, buf[0], buf[0])
+		case "u16":
+			buf, err := read(2)
+			if err != nil {
+				return toolErr(err)
+			}
+			v := binary.LittleEndian.Uint16(buf)
+			fmt.Fprintf(&b, "u16 @ 0x%08X = %d (0x%04X)\n", addr, v, v)
+		case "u32", "ptr":
+			buf, err := read(4)
+			if err != nil {
+				return toolErr(err)
+			}
+			v := binary.LittleEndian.Uint32(buf)
+			fmt.Fprintf(&b, "u32 @ 0x%08X = %d (0x%08X)\n", addr, v, v)
+		case "u64":
+			buf, err := read(8)
+			if err != nil {
+				return toolErr(err)
+			}
+			v := binary.LittleEndian.Uint64(buf)
+			fmt.Fprintf(&b, "u64 @ 0x%08X = %d (0x%016X)\n", addr, v, v)
+		case "s32":
+			buf, err := read(4)
+			if err != nil {
+				return toolErr(err)
+			}
+			v := int32(binary.LittleEndian.Uint32(buf))
+			fmt.Fprintf(&b, "s32 @ 0x%08X = %d\n", addr, v)
+		case "f32":
+			buf, err := read(4)
+			if err != nil {
+				return toolErr(err)
+			}
+			bits := binary.LittleEndian.Uint32(buf)
+			fmt.Fprintf(&b, "f32 @ 0x%08X = %g (bits 0x%08X)\n", addr, math.Float32frombits(bits), bits)
+		case "f64":
+			buf, err := read(8)
+			if err != nil {
+				return toolErr(err)
+			}
+			bits := binary.LittleEndian.Uint64(buf)
+			fmt.Fprintf(&b, "f64 @ 0x%08X = %g (bits 0x%016X)\n", addr, math.Float64frombits(bits), bits)
+		case "str":
+			ms, _ := noita.ReadMsvcString(reader.Ctx, uintptr(addr))
+			if ms == nil {
+				return toolErr(fmt.Errorf("read MsvcString at 0x%08X failed", addr))
+			}
+			fmt.Fprintf(&b, "MsvcString @ 0x%08X: len=%d cap=%d %q\n",
+				addr, ms.Length, ms.Capacity, ms.FormatMsvcString(reader.Ctx))
+		default:
+			return toolErr(fmt.Errorf("unknown type %q (want u8|u16|u32|u64|s32|f32|f64|str|ptr)", in.Type))
+		}
+		return textResult(b.String()), nil, nil
 	})
 }
