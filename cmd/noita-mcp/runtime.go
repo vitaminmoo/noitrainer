@@ -148,6 +148,40 @@ func appendChildTreeRT(b *strings.Builder, reader *noita.Reader, parent *noita.E
 	}
 }
 
+type materialsInput struct {
+	Filter string `json:"filter,omitempty" jsonschema:"optional substring match on material name"`
+}
+type materialInput struct {
+	MaterialID int `json:"material_id"`
+}
+type cellInput struct {
+	WX int32 `json:"wx"`
+	WY int32 `json:"wy"`
+}
+type chunksInput struct {
+	Samples int `json:"samples,omitempty" jsonschema:"max loaded chunks to sample (default 8)"`
+}
+
+// indentHexDumpRT mirrors cmd/cli/main.go:indentHexDump.
+func indentHexDumpRT(buf []byte, base uint32) string {
+	dump := hex.Dump(buf)
+	lines := strings.Split(strings.TrimRight(dump, "\n"), "\n")
+	var out strings.Builder
+	for _, ln := range lines {
+		if len(ln) >= 10 {
+			off64, err := strconv.ParseUint(strings.TrimSpace(ln[:8]), 16, 32)
+			if err == nil {
+				fmt.Fprintf(&out, "  %08x%s\n", uint32(off64)+base, ln[8:])
+				continue
+			}
+		}
+		out.WriteString("  ")
+		out.WriteString(ln)
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
 // registerRuntimeTools registers every runtime introspection tool.
 // Implementations are added in subsequent plan tasks.
 func registerRuntimeTools(s *mcp.Server) {
@@ -619,6 +653,163 @@ func registerRuntimeTools(s *mcp.Server) {
 			fmt.Fprintf(&b, "    Components: %s\n\n", strings.Join(compNames, ", "))
 		}
 
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "materials",
+		Description: "List CellFactory materials; optional name substring filter.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in materialsInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		mats := reader.ReadMaterials()
+		if len(mats) == 0 {
+			return toolErr(fmt.Errorf("no materials found (CellFactory unavailable?)"))
+		}
+		filter := strings.ToLower(in.Filter)
+		var b strings.Builder
+		fmt.Fprintf(&b, "%-5s %-32s %-10s %-11s %s\n", "ID", "Name", "Fallback", "Texture", "CellData")
+		fmt.Fprintf(&b, "%-5s %-32s %-10s %-11s %s\n", "──", "────", "────────", "───────", "────────")
+		shown := 0
+		for _, m := range mats {
+			if filter != "" && !strings.Contains(strings.ToLower(m.Name), filter) {
+				continue
+			}
+			tex := "—"
+			if m.TexturePtr != 0 {
+				tex = fmt.Sprintf("%dx%d", m.TexW, m.TexH)
+			}
+			name := m.Name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Fprintf(&b, "%-5d %-32s 0x%08X %-11s 0x%08X\n",
+				m.ID, truncateStr(name, 31), m.FallbackColor, tex, uint32(m.Addr))
+			shown++
+		}
+		fmt.Fprintf(&b, "\n%d / %d materials shown\n", shown, len(mats))
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "material",
+		Description: "Show full CellData for a material id.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in materialInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		mats := reader.ReadMaterials()
+		var mat *noita.MaterialInfo
+		for _, m := range mats {
+			if m.ID == in.MaterialID {
+				mat = m
+				break
+			}
+		}
+		if mat == nil {
+			return toolErr(fmt.Errorf("material %d not found (have %d materials)", in.MaterialID, len(mats)))
+		}
+		name := mat.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "=== Material %d: %s ===\n", mat.ID, name)
+		fmt.Fprintf(&b, "  CellData @     0x%08X\n", uint32(mat.Addr))
+		fmt.Fprintf(&b, "  FallbackColor  0x%08X (A=%d R=%d G=%d B=%d)\n",
+			mat.FallbackColor,
+			(mat.FallbackColor>>24)&0xFF, (mat.FallbackColor>>16)&0xFF,
+			(mat.FallbackColor>>8)&0xFF, mat.FallbackColor&0xFF)
+		if mat.TexturePtr == 0 {
+			fmt.Fprintf(&b, "  Texture:       (none)\n")
+			return textResult(b.String()), nil, nil
+		}
+		fmt.Fprintf(&b, "  Texture @      0x%08X\n", mat.TexturePtr)
+		fmt.Fprintf(&b, "    Size:        %dx%d (%d BGRA pixels)\n",
+			mat.TexW, mat.TexH, int64(mat.TexW)*int64(mat.TexH))
+		fmt.Fprintf(&b, "    PixelData @  0x%08X\n", mat.PixelDataPtr)
+		if mat.PixelDataPtr != 0 && mat.TexW > 0 && mat.TexH > 0 {
+			var px [4]byte
+			if _, err := reader.Ctx.ReadAt(px[:], int64(mat.PixelDataPtr)); err == nil {
+				fmt.Fprintf(&b, "    pixel[0,0]:  B=%d G=%d R=%d A=%d\n", px[0], px[1], px[2], px[3])
+			}
+		}
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "cell",
+		Description: "Resolve a world pixel to its chunk/cell pointers; dump first 0x40 bytes of the cell.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in cellInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		info := reader.ReadCellAt(in.WX, in.WY)
+		if info == nil {
+			return toolErr(fmt.Errorf("ChunkSystem unavailable"))
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "=== Cell lookup at (%d, %d) ===\n", in.WX, in.WY)
+		fmt.Fprintf(&b, "  Chunk coord:   (%d, %d)  table idx %d / 0x%X\n",
+			info.ChunkCX, info.ChunkCY, info.ChunkIdx, info.ChunkIdx)
+		if info.ChunkPtr == 0 {
+			fmt.Fprintf(&b, "  Chunk:         (unloaded — air)\n")
+			return textResult(b.String()), nil, nil
+		}
+		fmt.Fprintf(&b, "  Chunk @        0x%08X\n", info.ChunkPtr)
+		if info.CellSlotsPtr == 0 {
+			fmt.Fprintf(&b, "  CellSlots:     (none)\n")
+			return textResult(b.String()), nil, nil
+		}
+		fmt.Fprintf(&b, "  CellSlots @    0x%08X\n", info.CellSlotsPtr)
+		fmt.Fprintf(&b, "  Cell idx:      %d  (x%%512=%d, y%%512=%d)\n",
+			info.CellIdx, uint32(in.WX&0x1FF), uint32(in.WY&0x1FF))
+		if info.CellPtr == 0 {
+			fmt.Fprintf(&b, "  Cell:          0 (air)\n")
+			return textResult(b.String()), nil, nil
+		}
+		fmt.Fprintf(&b, "  Cell @         0x%08X\n", info.CellPtr)
+		buf := make([]byte, 0x40)
+		if _, err := reader.Ctx.ReadAt(buf, int64(info.CellPtr)); err == nil {
+			fmt.Fprintf(&b, "\n  First 0x40 bytes:\n%s", indentHexDumpRT(buf, info.CellPtr))
+		}
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "chunks",
+		Description: "Show ChunkSystem stats (total chunks, coord range) and sample some loaded chunks.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in chunksInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		samples := in.Samples
+		if samples <= 0 {
+			samples = 8
+		}
+		stats := reader.ReadChunkStats(samples)
+		if stats == nil {
+			return toolErr(fmt.Errorf("ChunkSystem unavailable"))
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "=== ChunkSystem ===\n")
+		fmt.Fprintf(&b, "  chunk_table @   0x%08X (%d entries)\n", stats.ChunkTablePtr, stats.TableEntries)
+		fmt.Fprintf(&b, "  loaded chunks:  %d\n", stats.Loaded)
+		if stats.Loaded > 0 {
+			fmt.Fprintf(&b, "  loaded coord range: cx [%d..%d] cy [%d..%d]\n",
+				stats.MinCX, stats.MaxCX, stats.MinCY, stats.MaxCY)
+		}
+		if len(stats.Samples) > 0 {
+			fmt.Fprintf(&b, "\n  Samples (first %d):\n", len(stats.Samples))
+			for _, sa := range stats.Samples {
+				fmt.Fprintf(&b, "    cx=%-3d cy=%-3d  Chunk* 0x%08X\n", sa.CX, sa.CY, sa.ChunkPtr)
+			}
+		}
 		return textResult(b.String()), nil, nil
 	})
 }
