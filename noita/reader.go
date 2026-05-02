@@ -46,6 +46,19 @@ type GameState struct {
 	CameraY float32
 	ViewW   float32
 	ViewH   float32
+
+	// Fungal shifts (and any other ConvertMaterialEverywhere calls).
+	// Logged in WorldStateComponent.changed_materials, oldest first.
+	FungalShifts []FungalShift
+}
+
+
+// FungalShift represents a single ConvertMaterialEverywhere call. Each fungal
+// shift script invocation typically produces multiple entries (one per
+// converted material in the source group).
+type FungalShift struct {
+	From string
+	To   string
 }
 
 // EntitySummary holds basic info about an entity for list display.
@@ -210,6 +223,42 @@ func (r *Reader) ReadCamera() *CameraState {
 }
 
 // ReadState reads a complete game state snapshot.
+// ReadFungalShifts decodes WorldStateComponent.changed_materials, the flat
+// std::vector<std::string> updated by ConvertMaterialEverywhere. The vector
+// stores alternating from/to names — every call appends the pair, so a single
+// fungal shift that converts a 3-material source group produces 3 entries.
+// Returns shifts in oldest-first order.
+func (r *Reader) ReadFungalShifts(vec *StdVectorHeader) []FungalShift {
+	if vec == nil || vec.BeginPtr == 0 || vec.EndPtr <= vec.BeginPtr {
+		return nil
+	}
+	const stride = 24 // sizeof(MsvcString)
+	count := int((vec.EndPtr - vec.BeginPtr) / stride)
+	if count <= 0 || count > 4096 {
+		return nil
+	}
+	pairs := count / 2
+	if pairs == 0 {
+		return nil
+	}
+	out := make([]FungalShift, 0, pairs)
+	for i := 0; i < pairs; i++ {
+		fromAddr := uintptr(int64(vec.BeginPtr) + int64(i*2*stride))
+		toAddr := uintptr(int64(vec.BeginPtr) + int64((i*2+1)*stride))
+		from, _ := ReadMsvcString(r.Ctx, fromAddr)
+		to, _ := ReadMsvcString(r.Ctx, toAddr)
+		shift := FungalShift{}
+		if from != nil {
+			shift.From = from.FormatMsvcString(r.Ctx)
+		}
+		if to != nil {
+			shift.To = to.FormatMsvcString(r.Ctx)
+		}
+		out = append(out, shift)
+	}
+	return out
+}
+
 func (r *Reader) ReadState() *GameState {
 	gs := &GameState{Connected: true}
 
@@ -240,6 +289,9 @@ func (r *Reader) ReadState() *GameState {
 
 	// Read WorldStateComponent (pointer indirection)
 	gs.WorldState, _ = ReadGWorldState(r.Ctx)
+	if gs.WorldState != nil {
+		gs.FungalShifts = r.ReadFungalShifts(&gs.WorldState.ChangedMaterials)
+	}
 
 	// Find player entity via DeathMatchApp -> player_entities vector
 	dma, _ := ReadGDeathMatchApp(r.Ctx)

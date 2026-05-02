@@ -1284,7 +1284,7 @@ func (m model) viewWands() string {
 // ── World tab ──────────────────────────────────────────────────────
 
 func (m model) viewWorld() string {
-	var sections []string
+	var leftSections []string
 
 	{
 		rows := []string{
@@ -1300,7 +1300,7 @@ func (m model) viewWorld() string {
 				row("View Size", fmt.Sprintf("%.0f x %.0f", m.state.ViewW, m.state.ViewH)),
 			)
 		}
-		sections = append(sections, renderSection("World", rows))
+		leftSections = append(leftSections, renderSection("World", rows))
 	}
 
 	if ws := m.state.WorldState; ws != nil {
@@ -1309,10 +1309,69 @@ func (m model) viewWorld() string {
 			row("Gods Impressed", fmt.Sprintf("%d", ws.GodsImpressed)),
 			row("Gods Enraged", fmt.Sprintf("%d", ws.GodsEnraged)),
 		}
-		sections = append(sections, renderSection("Gods", rows))
+		leftSections = append(leftSections, renderSection("Gods", rows))
 	}
 
-	return strings.Join(sections, "")
+	leftCol := strings.Join(leftSections, "")
+
+	// Right column: fungal shifts
+	rightCol := renderShifts(m.state.FungalShifts)
+	if rightCol == "" {
+		return leftCol
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol)
+}
+
+// renderShifts groups changed_materials entries into logical fungal-shift
+// invocations: consecutive pairs that share a destination collapse into one
+// line ("oil/swamp/peat → blood"). Solo pairs (held-material override) render
+// as a single arrow. Returns "" when there are no shifts.
+func renderShifts(shifts []noita.FungalShift) string {
+	if len(shifts) == 0 {
+		return ""
+	}
+
+	matStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#8BE9FD"))
+	arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6"))
+	idxStyle := dimStyle
+
+	// Group consecutive shifts with the same target.
+	type group struct {
+		froms []string
+		to    string
+	}
+	var groups []group
+	for _, s := range shifts {
+		from := shortMat(s.From)
+		to := shortMat(s.To)
+		if n := len(groups); n > 0 && groups[n-1].to == to {
+			groups[n-1].froms = append(groups[n-1].froms, from)
+			continue
+		}
+		groups = append(groups, group{froms: []string{from}, to: to})
+	}
+
+	rows := make([]string, 0, len(groups)+1)
+	rows = append(rows, dimStyle.Render(fmt.Sprintf("%d shift(s), %d conversion(s)", len(groups), len(shifts))))
+	for i, g := range groups {
+		fromStr := matStyle.Render(strings.Join(g.froms, "/"))
+		arrow := arrowStyle.Render(" → ")
+		toStr := matStyle.Render(g.to)
+		idx := idxStyle.Render(fmt.Sprintf("%2d.", i+1))
+		rows = append(rows, fmt.Sprintf("%s %s%s%s", idx, fromStr, arrow, toStr))
+	}
+	return renderSection("Fungal Shifts", rows)
+}
+
+// shortMat trims redundant prefixes from material names for compact display.
+func shortMat(name string) string {
+	switch {
+	case strings.HasPrefix(name, "magic_liquid_"):
+		return strings.TrimPrefix(name, "magic_liquid_")
+	case strings.HasPrefix(name, "material_"):
+		return strings.TrimPrefix(name, "material_")
+	}
+	return name
 }
 
 // ── Overlay tab ────────────────────────────────────────────────────

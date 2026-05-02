@@ -562,8 +562,18 @@ struct Inventory2Component {
 struct WorldStateComponent {
     ComponentHeader header      [[inline]];
 
-    // +0x48 to +0x107: time, weather, day_count fields
-    padding[0xC0];
+    // +0x48 to +0xFB: time/weather/wind, lua_globals map, pending_portals,
+    // apparitions_per_level, npc_parties, session_stat_file, orbs_found_thisrun,
+    // flags vector — not yet broken out.
+    padding[0xB4];
+
+    // +0xFC: changed_materials — std::vector<std::string> of alternating
+    // from/to material names. Each ConvertMaterialEverywhere call (e.g.
+    // fungal shifts via data/scripts/magic/fungal_shift.lua) appends
+    // exactly two MsvcStrings (from, then to). Element stride 24 bytes.
+    StdVectorHeader changed_materials   [[name("changedMaterials"),
+        color("FF8844"),
+        comment("Alternating from/to material names from ConvertMaterialEverywhere (fungal shifts)")]];
 
     // +0x108: Gods counters
     s32 biome_crypt_count       [[name("BIOME_CRYPT")]];
