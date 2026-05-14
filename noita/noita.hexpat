@@ -44,6 +44,26 @@ struct StdVectorHeader {
     u32 capacity_ptr;
 } [[sealed, static, format("format_vector")]];
 
+// MSVC std::map<K,V> header (8 bytes). Pair-compressed allocator means only
+// the _Tree_val members are actually stored: a pointer to the head sentinel
+// node, and the element count.
+//
+// Each tree node is 64 bytes:
+//   +0x00 _Left   (u32)   — child or head sentinel for nil
+//   +0x04 _Parent (u32)
+//   +0x08 _Right  (u32)
+//   +0x0C _Color  (u8)    — 0=red, 1=black
+//   +0x0D _Isnil  (u8)    — head sentinel has 1, real nodes 0
+//   +0x0E pad
+//   +0x10 _Myval = pair<K,V>
+//
+// For std::map<std::string, std::string> _Myval is two MsvcStrings (24+24).
+// Iterate from head->_Parent (the root); skip nodes whose _Isnil byte is set.
+struct StdMapHeader {
+    u32 head_ptr;
+    u32 size;
+} [[sealed, static]];
+
 fn format_vector(StdVectorHeader v) {
     if (v.begin_ptr == 0) return "empty";
     u32 count = (v.end_ptr - v.begin_ptr) / 4;
@@ -512,6 +532,9 @@ struct GameEffectComponent {
 
     // +0x48
     s32 effect                  [[comment("GAME_EFFECT enum value")]];
+    // +0x4C
+    MsvcString custom_effect_id [[comment("Effect ID for effect=CUSTOM (e.g. \"NECROBOT\")")]];
+    // +0x64
     s32 frames                  [[comment("Duration in frames; -1=forever")]];
 } [[color("BD93F9")]];
 
@@ -562,10 +585,35 @@ struct Inventory2Component {
 struct WorldStateComponent {
     ComponentHeader header      [[inline]];
 
-    // +0x48 to +0xFB: time/weather/wind, lua_globals map, pending_portals,
-    // apparitions_per_level, npc_parties, session_stat_file, orbs_found_thisrun,
-    // flags vector — not yet broken out.
-    padding[0xB4];
+    // +0x48..+0x9B: weather, wind, lighting, lightning, player_spawn_location.
+    // (Not broken out yet; would be is_initialized + 18 floats + a CVector2.)
+    padding[0x54];
+
+    // +0x9C: lua_globals — std::map<std::string,std::string> backing
+    // GlobalsGetValue / GlobalsSetValue. Holds run-persistent script state:
+    // fungal_shift_iteration, fungal_shift_last_frame, HOLY_MOUNTAIN_DEPTH,
+    // perk_pickup_count, mods, etc.
+    StdMapHeader lua_globals    [[name("luaGlobals"),
+        color("50FA7B"),
+        comment("std::map<string,string> from GlobalsGetValue/SetValue")]];
+
+    // +0xA4..+0xCB: pending_portals + next_portal_id + apparitions_per_level
+    // + npc_parties — left opaque.
+    padding[0x28];
+
+    // +0xCC..+0xE3: session_stat_file (std::string, 24 bytes).
+    padding[0x18];
+
+    // +0xE4: orbs_found_thisrun — std::vector<int> of orb ids picked up.
+    S32Vector orbs_found_thisrun        [[name("orbsFoundThisRun"),
+        color("F1FA8C"),
+        comment("Orb IDs picked up this run")]];
+
+    // +0xF0: flags — std::vector<std::string> of run-milestone flags
+    // (card_unlocked_*, game_won, ending98_completed, ...).
+    StdVectorHeader flags               [[name("flagsVec"),
+        color("8BE9FD"),
+        comment("Run flags from AddFlagPersistent / similar")]];
 
     // +0xFC: changed_materials — std::vector<std::string> of alternating
     // from/to material names. Each ConvertMaterialEverywhere call (e.g.
@@ -575,12 +623,20 @@ struct WorldStateComponent {
         color("FF8844"),
         comment("Alternating from/to material names from ConvertMaterialEverywhere (fungal shifts)")]];
 
-    // +0x108: Gods counters
-    s32 biome_crypt_count       [[name("BIOME_CRYPT")]];
-    s32 gods_afraid             [[color("FF44FF"), comment("Polymorph count → angry/very angry")]];
-    s32 gods_impressed          [[color("FF44FF"), comment("Kill counter")]];
-    s32 gods_afraid_damage;
-    s32 gods_enraged            [[color("FF44FF"), comment("Death counter → curious")]];
+    // +0x108: Five player counters that drive god reactions.
+    // Names follow the schema dump (data/schemas/*.xml). The TUI currently
+    // groups them as "gods afraid/impressed/enraged" — these are the raw
+    // counters that feed those concepts.
+    s32 player_polymorph_count          [[color("FF44FF"),
+        comment("Polymorphs taken — gods afraid threshold")]];
+    s32 player_polymorph_random_count   [[color("FF44FF"),
+        comment("Random polymorphs — gods very afraid threshold")]];
+    s32 player_did_infinite_spell_count [[color("FF44FF"),
+        comment("Infinite-spell exploits triggered")]];
+    s32 player_did_damage_over_1milj    [[color("FF44FF"),
+        comment("Single hits dealing >1M damage — gods impressed")]];
+    s32 player_living_with_minus_hp     [[color("FF44FF"),
+        comment("Frames lived at <0 HP")]];
 
     // +0x11C to +0x1C7
     padding[0xAC];

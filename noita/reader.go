@@ -50,6 +50,22 @@ type GameState struct {
 	// Fungal shifts (and any other ConvertMaterialEverywhere calls).
 	// Logged in WorldStateComponent.changed_materials, oldest first.
 	FungalShifts []FungalShift
+
+	// Persistent Lua globals (GlobalsGetValue / GlobalsSetValue).
+	// Includes fungal_shift_iteration, HOLY_MOUNTAIN_DEPTH, perk picks, etc.
+	LuaGlobals map[string]string
+
+	// Run-milestone flags from WorldStateComponent.flags.
+	Flags []string
+
+	// Orb IDs picked up this run.
+	OrbsFoundThisRun []int32
+
+	// Active GameEffectComponents on the player (status effects, perks).
+	PlayerEffects []ActiveEffect
+
+	// Spell-card names loaded into each wand (parallel to Wands).
+	WandSpells [][]string
 }
 
 
@@ -59,6 +75,15 @@ type GameState struct {
 type FungalShift struct {
 	From string
 	To   string
+}
+
+
+// ActiveEffect is a GameEffectComponent attached to (a child of) the player.
+type ActiveEffect struct {
+	Name           string // entity name of the carrier (often empty)
+	CustomEffectID string // populated for effect=CUSTOM perks like PROTECTION_RADIOACTIVITY
+	Effect         int32  // GAME_EFFECT enum index
+	Frames         int32  // -1 = forever
 }
 
 // EntitySummary holds basic info about an entity for list display.
@@ -228,6 +253,185 @@ func (r *Reader) ReadCamera() *CameraState {
 // stores alternating from/to names — every call appends the pair, so a single
 // fungal shift that converts a 3-material source group produces 3 entries.
 // Returns shifts in oldest-first order.
+// ReadLuaGlobals walks the MSVC red-black tree backing
+// WorldStateComponent.lua_globals and returns every {key, value} pair. Used by
+// the script API GlobalsGetValue / GlobalsSetValue. Returns nil if empty.
+//
+// MSVC tree node layout (64 bytes):
+//
+//	+0x00 _Left   uint32
+//	+0x04 _Parent uint32
+//	+0x08 _Right  uint32
+//	+0x0C _Color  uint8
+//	+0x0D _Isnil  uint8
+//	+0x10 key     MsvcString (24 bytes)
+//	+0x28 value   MsvcString (24 bytes)
+//
+// The map header points at the head sentinel. head._Parent is the real root.
+// Real nodes have _Isnil == 0; nil children point back to the head sentinel.
+func (r *Reader) ReadLuaGlobals(m *StdMapHeader) map[string]string {
+	if m == nil || m.HeadPtr == 0 || m.Size == 0 {
+		return nil
+	}
+	if m.Size > 8192 {
+		return nil // sanity
+	}
+
+	// Read head sentinel; root = head._Parent.
+	var head [16]byte
+	if _, err := r.Ctx.ReadAt(head[:], int64(m.HeadPtr)); err != nil {
+		return nil
+	}
+	root := binary.LittleEndian.Uint32(head[4:8])
+	if root == 0 || root == m.HeadPtr {
+		return nil
+	}
+
+	out := make(map[string]string, m.Size)
+	stack := []uint32{root}
+	visited := 0
+	limit := int(m.Size) * 2 // soft bound to survive races / cycles
+	if limit > 16384 {
+		limit = 16384
+	}
+
+	for len(stack) > 0 && visited < limit {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if node == 0 || node == m.HeadPtr {
+			continue
+		}
+
+		var raw [16]byte
+		if _, err := r.Ctx.ReadAt(raw[:], int64(node)); err != nil {
+			continue
+		}
+		if raw[13] != 0 { // _Isnil
+			continue
+		}
+		left := binary.LittleEndian.Uint32(raw[0:4])
+		right := binary.LittleEndian.Uint32(raw[8:12])
+		if left != 0 && left != m.HeadPtr {
+			stack = append(stack, left)
+		}
+		if right != 0 && right != m.HeadPtr {
+			stack = append(stack, right)
+		}
+
+		key, _ := ReadMsvcString(r.Ctx, uintptr(int64(node)+0x10))
+		val, _ := ReadMsvcString(r.Ctx, uintptr(int64(node)+0x28))
+		if key == nil {
+			continue
+		}
+		k := key.FormatMsvcString(r.Ctx)
+		if k == "" {
+			continue
+		}
+		v := ""
+		if val != nil {
+			v = val.FormatMsvcString(r.Ctx)
+		}
+		out[k] = v
+		visited++
+	}
+	return out
+}
+
+// ReadMsvcStringVector decodes a std::vector<std::string> by reading each
+// 24-byte MsvcString in place. Used for run flags, biome tags, etc.
+func (r *Reader) ReadMsvcStringVector(vec *StdVectorHeader) []string {
+	if vec == nil || vec.BeginPtr == 0 || vec.EndPtr <= vec.BeginPtr {
+		return nil
+	}
+	const stride = 24
+	count := int((vec.EndPtr - vec.BeginPtr) / stride)
+	if count <= 0 || count > 4096 {
+		return nil
+	}
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		s, _ := ReadMsvcString(r.Ctx, uintptr(int64(vec.BeginPtr)+int64(i*stride)))
+		if s == nil {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, s.FormatMsvcString(r.Ctx))
+	}
+	return out
+}
+
+// ReadPlayerEffects collects every GameEffectComponent in the player's child
+// tree (effects are attached to short-lived child entities). Returns the
+// component fields plus the holding entity's name (e.g. "effect_drunk").
+func (r *Reader) ReadPlayerEffects(em *EntityManager, player *Entity) []ActiveEffect {
+	if em == nil || player == nil {
+		return nil
+	}
+	var out []ActiveEffect
+
+	// Effects can be on the player itself or on its child entities.
+	visit := func(e *Entity) {
+		if e == nil || e.PendingKill >= 1 {
+			return
+		}
+		effects := readAllComponents[GameEffectComponent](r, em, e.SlotIndex,
+			TypeIDGameEffectComponent, ReadGameEffectComponent)
+		for _, gec := range effects {
+			if gec == nil || !gec.Header.Active {
+				continue
+			}
+			out = append(out, ActiveEffect{
+				Name:           e.Name.FormatMsvcString(r.Ctx),
+				CustomEffectID: gec.CustomEffectId.FormatMsvcString(r.Ctx),
+				Effect:         gec.Effect,
+				Frames:         gec.Frames,
+			})
+		}
+	}
+
+	visit(player)
+	for _, cp := range r.readChildEntityPtrs(player) {
+		if cp == 0 {
+			continue
+		}
+		c, _ := ReadEntity(r.Ctx, uintptr(cp))
+		visit(c)
+	}
+	return out
+}
+
+// ReadWandSpellNames returns the spell action_id strings loaded into the given
+// wand entity, in slot order. Each spell card is a child entity of the wand
+// with an ItemActionComponent; that component's only field (after the standard
+// 0x48 header) is action_id (an MsvcString).
+func (r *Reader) ReadWandSpellNames(em *EntityManager, wand *Entity) []string {
+	if em == nil || wand == nil {
+		return nil
+	}
+	var out []string
+	for _, cp := range r.readChildEntityPtrs(wand) {
+		if cp == 0 {
+			continue
+		}
+		child, _ := ReadEntity(r.Ctx, uintptr(cp))
+		if child == nil || child.PendingKill >= 1 {
+			continue
+		}
+		compPtr := r.findComponentPtr(em, child.SlotIndex, TypeIDItemActionComponent)
+		if compPtr == 0 {
+			continue
+		}
+		// action_id MsvcString starts at component_ptr + 0x48 (after the
+		// shared ComponentHeader).
+		s, _ := ReadMsvcString(r.Ctx, uintptr(int64(compPtr)+0x48))
+		if s == nil {
+			continue
+		}
+		out = append(out, s.FormatMsvcString(r.Ctx))
+	}
+	return out
+}
+
 func (r *Reader) ReadFungalShifts(vec *StdVectorHeader) []FungalShift {
 	if vec == nil || vec.BeginPtr == 0 || vec.EndPtr <= vec.BeginPtr {
 		return nil
@@ -291,6 +495,11 @@ func (r *Reader) ReadState() *GameState {
 	gs.WorldState, _ = ReadGWorldState(r.Ctx)
 	if gs.WorldState != nil {
 		gs.FungalShifts = r.ReadFungalShifts(&gs.WorldState.ChangedMaterials)
+		gs.LuaGlobals = r.ReadLuaGlobals(&gs.WorldState.LuaGlobals)
+		gs.Flags = r.ReadMsvcStringVector(&gs.WorldState.Flags)
+		if elems := gs.WorldState.OrbsFoundThisrun.Elements; len(elems) > 0 {
+			gs.OrbsFoundThisRun = append([]int32(nil), elems...)
+		}
 	}
 
 	// Find player entity via DeathMatchApp -> player_entities vector
@@ -327,6 +536,20 @@ func (r *Reader) ReadState() *GameState {
 			gs.Wands = append(gs.Wands, item)
 		} else {
 			gs.Items = append(gs.Items, item)
+		}
+	}
+
+	// Active status effects (parented under the player).
+	gs.PlayerEffects = r.ReadPlayerEffects(em, gs.PlayerEntity)
+
+	// Loaded spell decks per wand (parallel to gs.Wands).
+	if len(gs.Wands) > 0 {
+		gs.WandSpells = make([][]string, len(gs.Wands))
+		for i, w := range gs.Wands {
+			if w == nil || w.Entity == nil {
+				continue
+			}
+			gs.WandSpells[i] = r.ReadWandSpellNames(em, w.Entity)
 		}
 	}
 

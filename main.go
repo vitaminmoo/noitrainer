@@ -598,6 +598,7 @@ func initialModel(logBuf *ringLog) model {
 		logBuf:         logBuf,
 		overlayCats: map[entityCategory]bool{
 			catEnemy: true,
+			catItem:  true,
 		},
 		overlayOpts: map[overlayOption]bool{
 			optHideAtOrigin:  true,
@@ -999,7 +1000,7 @@ func (m model) viewPlayer() string {
 		}
 	}
 
-	// Right column: wallet + world summary
+	// Right column: wallet + world summary + status effects
 	{
 		var sections []string
 		if w := m.state.PlayerWallet; w != nil {
@@ -1008,6 +1009,18 @@ func (m model) viewPlayer() string {
 				row("Gold Spent", fmt.Sprintf("%d", w.MoneySpent)),
 			}
 			sections = append(sections, renderSection("Wallet", rows))
+		}
+
+		// Active status effects.
+		if len(m.state.PlayerEffects) > 0 {
+			rows := make([]string, 0, len(m.state.PlayerEffects))
+			for _, e := range m.state.PlayerEffects {
+				name := effectLabel(e)
+				dur := effectDuration(e.Frames)
+				rows = append(rows, row(name, dur))
+			}
+			sections = append(sections, renderSection(
+				fmt.Sprintf("Status Effects (%d)", len(m.state.PlayerEffects)), rows))
 		}
 
 		// Entity summary counts
@@ -1045,6 +1058,30 @@ func (m model) viewPlayer() string {
 		return dimStyle.Render("No player data available")
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, cols...)
+}
+
+// effectLabel picks the most descriptive name available for a status effect:
+// the CUSTOM id (perks), the carrier entity name, or a generic enum index.
+func effectLabel(e noita.ActiveEffect) string {
+	if e.CustomEffectID != "" {
+		return e.CustomEffectID
+	}
+	if e.Name != "" {
+		return e.Name
+	}
+	return fmt.Sprintf("effect_%d", e.Effect)
+}
+
+// effectDuration formats a frame count as duration; -1 means permanent.
+func effectDuration(frames int32) string {
+	if frames < 0 {
+		return dimStyle.Render("permanent")
+	}
+	sec := float64(frames) / 60.0
+	if sec < 60 {
+		return fmt.Sprintf("%.1fs", sec)
+	}
+	return fmt.Sprintf("%dm %ds", int(sec)/60, int(sec)%60)
 }
 
 // ── Entities tab ───────────────────────────────────────────────────
@@ -1232,6 +1269,7 @@ func (m model) viewWands() string {
 	wrow := func(label, value string) string {
 		return wlabel.Render(label) + valueStyle.Render(value)
 	}
+	spellStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9"))
 
 	var wandCols []string
 	for i := 0; i < numSlots; i++ {
@@ -1250,6 +1288,17 @@ func (m model) viewWands() string {
 				wrow("Mana", manaStyle.Render(fmt.Sprintf("%.0f / %.0f", w.Mana, w.ManaMax))),
 				wrow("Mana Regen", fmt.Sprintf("%.0f/s", w.ManaChargeSpeed*60)),
 				wrow("Reload", fmt.Sprintf("%.2fs (%df)", float64(gc.ReloadTime)/60.0, gc.ReloadTime)),
+			}
+			// Spell deck.
+			var spells []string
+			if i < len(m.state.WandSpells) {
+				spells = m.state.WandSpells[i]
+			}
+			rows = append(rows, wrow("Spells",
+				fmt.Sprintf("%d / %d", len(spells), gc.DeckCapacity)))
+			for j, s := range spells {
+				rows = append(rows, dimStyle.Render(fmt.Sprintf("  %d. ", j+1))+
+					spellStyle.Render(s))
 			}
 			wandCols = append(wandCols, renderSection(name, rows))
 		} else {
@@ -1289,8 +1338,10 @@ func (m model) viewWorld() string {
 	{
 		rows := []string{
 			row("World Seed", fmt.Sprintf("%d", m.state.WorldSeed)),
+			row("NG+ Level", fmt.Sprintf("%d", m.state.NgPlusCount)),
 			row("Death Count", fmt.Sprintf("%d", m.state.DeathCount)),
-			row("Orbs Total", fmt.Sprintf("%d", m.state.NumOrbsTotal)),
+			row("Orbs Collected", fmt.Sprintf("%d / %d",
+				len(m.state.OrbsFoundThisRun), m.state.NumOrbsTotal)),
 		}
 		if g := m.state.Globals; g != nil {
 			rows = append(rows,
@@ -1305,21 +1356,78 @@ func (m model) viewWorld() string {
 
 	if ws := m.state.WorldState; ws != nil {
 		rows := []string{
-			row("Gods Afraid", fmt.Sprintf("%d", ws.GodsAfraid)),
-			row("Gods Impressed", fmt.Sprintf("%d", ws.GodsImpressed)),
-			row("Gods Enraged", fmt.Sprintf("%d", ws.GodsEnraged)),
+			row("Polymorphs", fmt.Sprintf("%d", ws.PlayerPolymorphCount)),
+			row("Random Polymorphs", fmt.Sprintf("%d", ws.PlayerPolymorphRandomCount)),
+			row("Infinite Spells", fmt.Sprintf("%d", ws.PlayerDidInfiniteSpellCount)),
+			row("Hits >1M Damage", fmt.Sprintf("%d", ws.PlayerDidDamageOver1milj)),
+			row("Frames at -HP", fmt.Sprintf("%d", ws.PlayerLivingWithMinusHp)),
 		}
-		leftSections = append(leftSections, renderSection("Gods", rows))
+		leftSections = append(leftSections, renderSection("Player Counters", rows))
+	}
+
+	// Highlight a few well-known lua_globals if present.
+	if len(m.state.LuaGlobals) > 0 {
+		highlights := []struct{ key, label string }{
+			{"HOLY_MOUNTAIN_DEPTH", "Holy Mt Depth"},
+			{"HOLY_MOUNTAIN_VISITS", "Holy Mt Visits"},
+			{"TEMPLE_NEXT_PERK_INDEX", "Next Perk Idx"},
+			{"fungal_shift_iteration", "Shifts Used"},
+			{"fungal_shift_last_frame", "Last Shift Frame"},
+			{"visited_biomes_count", "Biomes Visited"},
+		}
+		var rows []string
+		for _, h := range highlights {
+			if v, ok := m.state.LuaGlobals[h.key]; ok {
+				rows = append(rows, row(h.label, v))
+			}
+		}
+		// Fungal shift cooldown (5 in-game minutes = 18000 frames).
+		if last, ok := m.state.LuaGlobals["fungal_shift_last_frame"]; ok && m.state.Globals != nil {
+			if lastFrame, err := strconv.Atoi(last); err == nil {
+				ready := lastFrame + 60*60*5
+				remaining := ready - int(m.state.Globals.FrameCount)
+				if remaining <= 0 {
+					rows = append(rows, row("Shift Ready",
+						lipgloss.NewStyle().Foreground(lipgloss.Color("#50FA7B")).Render("yes")))
+				} else {
+					sec := float64(remaining) / 60.0
+					rows = append(rows, row("Shift Cooldown",
+						lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")).
+							Render(fmt.Sprintf("%.1fs", sec))))
+				}
+			}
+		}
+		if len(rows) > 0 {
+			leftSections = append(leftSections, renderSection("Run State", rows))
+		}
 	}
 
 	leftCol := strings.Join(leftSections, "")
 
+	// Middle column: flags
+	var middleCol string
+	if len(m.state.Flags) > 0 {
+		rows := make([]string, 0, len(m.state.Flags))
+		for _, f := range m.state.Flags {
+			rows = append(rows, dimStyle.Render("• ")+valueStyle.Render(f))
+		}
+		middleCol = renderSection(fmt.Sprintf("Run Flags (%d)", len(m.state.Flags)), rows)
+	}
+
 	// Right column: fungal shifts
 	rightCol := renderShifts(m.state.FungalShifts)
-	if rightCol == "" {
+
+	cols := []string{leftCol}
+	if middleCol != "" {
+		cols = append(cols, middleCol)
+	}
+	if rightCol != "" {
+		cols = append(cols, rightCol)
+	}
+	if len(cols) == 1 {
 		return leftCol
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol)
+	return lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 }
 
 // renderShifts groups changed_materials entries into logical fungal-shift
