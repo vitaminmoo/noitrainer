@@ -25,6 +25,7 @@ func usage() {
 Commands:
   watch                  Watch game state changes (original behavior)
   entities               List all entities with component info
+  entities-dump          Emit NDJSON for every entity (id, name, pos, components)
   entity <id>            Show detailed info for entity by ID
   tree <id>              Show entity parent/child tree
   buffers                List all component buffers (type registry)
@@ -67,6 +68,8 @@ func main() {
 		cmdWatch()
 	case "entities":
 		cmdEntities()
+	case "entities-dump":
+		cmdEntitiesDump()
 	case "entity":
 		if len(os.Args) < 3 {
 			fmt.Fprintf(os.Stderr, "Usage: noitrainer-cli entity <entity-id>\n")
@@ -389,6 +392,51 @@ func cmdEntities() {
 			strings.Join(compNames, ", "),
 		)
 	}
+}
+
+// cmdEntitiesDump emits NDJSON (one line per entity) suitable for diffing
+// against a telescope-side prediction. Ground-truth counterpart to
+// `scripts/dump.mjs entities` in the noita-telescope repo.
+//
+// Output schema:
+//
+//	{"entityId":12345,"name":"worm","x":-1024,"y":512,"components":["VelocityComponent",...]}
+func cmdEntitiesDump() {
+	reader, _ := connect()
+	nameMap := buildBufferNameMap(reader)
+	entities := reader.ReadEntityList()
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	count := 0
+	for _, e := range entities {
+		compNames := make([]string, 0, len(e.ComponentIDs))
+		for _, cid := range e.ComponentIDs {
+			if n, ok := nameMap[cid]; ok {
+				compNames = append(compNames, n)
+			} else {
+				compNames = append(compNames, fmt.Sprintf("type_%d", cid))
+			}
+		}
+		row := struct {
+			EntityId   int32    `json:"entityId"`
+			Name       string   `json:"name"`
+			X          float32  `json:"x"`
+			Y          float32  `json:"y"`
+			Ptr        string   `json:"ptr"`
+			Components []string `json:"components"`
+		}{
+			EntityId:   e.Entity.EntityId,
+			Name:       e.Name,
+			X:          e.Entity.PosX,
+			Y:          e.Entity.PosY,
+			Ptr:        fmt.Sprintf("0x%08x", e.Ptr),
+			Components: compNames,
+		}
+		_ = enc.Encode(&row)
+		count++
+	}
+	fmt.Fprintf(os.Stderr, "%d entities emitted\n", count)
 }
 
 // ── entity ─────────────────────────────────────────────────────────
