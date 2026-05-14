@@ -4,11 +4,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"math"
 	"sort"
 	"strconv"
@@ -213,6 +218,18 @@ func boolToIntRT(b bool) int {
 type peekInput struct {
 	Addr string `json:"addr" jsonschema:"address, decimal or 0x-prefixed hex"`
 	Size int    `json:"size,omitempty" jsonschema:"bytes to dump (default 128)"`
+}
+
+type cellColorInput struct {
+	WX int32 `json:"wx"`
+	WY int32 `json:"wy"`
+}
+
+type cellgridBlitInput struct {
+	WX int32 `json:"wx"`
+	WY int32 `json:"wy"`
+	W  int32 `json:"w" jsonschema:"width in world pixels (max 1024)"`
+	H  int32 `json:"h" jsonschema:"height in world pixels (max 1024)"`
 }
 type derefInput struct {
 	Addr string `json:"addr" jsonschema:"address of a u32 pointer to dereference"`
@@ -1177,5 +1194,183 @@ func registerRuntimeTools(s *mcp.Server) {
 			return toolErr(fmt.Errorf("unknown type %q (want u8|u16|u32|u64|s32|f32|f64|str|ptr)", in.Type))
 		}
 		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "cell_color",
+		Description: "Return the rendered cell color at world pixel (wx, wy). Reads cell+0x30 — the engine's mColor slot, which is the texture-sampled-and-edge-stamped pixel that ends up in the GPU sprite_cellgrid texture. Memory layout is BGRA8 per the CellTexture convention. Returns JSON with {raw_hex, b, g, r, a, mirror_hex} where mirror_hex is the same field at cell+0x34 (a backup the engine maintains, often equal). Air cells (no live cell at that coord) return {present: false}.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in cellColorInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		info := reader.ReadCellAt(in.WX, in.WY)
+		if info == nil {
+			return toolErr(fmt.Errorf("ChunkSystem unavailable"))
+		}
+		if info.CellPtr == 0 {
+			data, _ := json.Marshal(map[string]any{
+				"wx": in.WX, "wy": in.WY, "present": false, "reason": "air",
+			})
+			return textResult(string(data)), nil, nil
+		}
+		var buf [8]byte
+		if _, err := reader.Ctx.ReadAt(buf[:], int64(info.CellPtr)+0x30); err != nil {
+			return toolErr(fmt.Errorf("read cell color at 0x%08X: %w", info.CellPtr+0x30, err))
+		}
+		// Engine stores cell pixels BGRA in memory (matches CellTexture in
+		// noita.hexpat). Decode both slots so callers can confirm the
+		// engine maintains the mirror at +0x34 (often a snapshot for
+		// diff/staining vs the live mColor at +0x30).
+		decode := func(b []byte) map[string]any {
+			c := binary.LittleEndian.Uint32(b)
+			return map[string]any{
+				"raw_hex": fmt.Sprintf("0x%08X", c),
+				"b":       int(b[0]),
+				"g":       int(b[1]),
+				"r":       int(b[2]),
+				"a":       int(b[3]),
+			}
+		}
+		out := map[string]any{
+			"wx":         in.WX,
+			"wy":         in.WY,
+			"present":    true,
+			"cell_ptr":   fmt.Sprintf("0x%08X", info.CellPtr),
+			"primary":    decode(buf[0:4]),
+			"mirror":     decode(buf[4:8]),
+		}
+		data, _ := json.Marshal(out)
+		return textResult(string(data)), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "cellgrid_blit",
+		Description: "Read a w×h block of the engine's per-cell rendered colors (cell+0x30, BGRA8) and return a base64-encoded PNG of the result. Air cells become transparent. Use to compare the engine's actual on-screen materials/edges against an offline renderer — the data here matches what the engine uploads to the GPU sprite_cellgrid texture (before the post bilinear/dilate shaders). Max 1024×1024.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in cellgridBlitInput) (*mcp.CallToolResult, any, error) {
+		if in.W <= 0 || in.H <= 0 {
+			return toolErr(fmt.Errorf("w and h must be > 0"))
+		}
+		if in.W > 1024 || in.H > 1024 {
+			return toolErr(fmt.Errorf("w and h must each be ≤ 1024 (got %dx%d)", in.W, in.H))
+		}
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		// Per-chunk batching: every chunk overlapping the rect is loaded
+		// once. Cell-slots is a 512*512 array of u32 cell pointers (1 MiB
+		// per chunk) — read once per chunk, then per-cell mColor is a
+		// 4-byte read. Cuts ChunkSystem-traversal overhead from
+		// O(W*H) ReadCellAt calls down to ~4 chunk slot reads + W*H 4-byte
+		// reads. Reading cell mColors individually keeps the impl simple;
+		// it's still fast enough for sub-1024² rects.
+		const chunkSide = 512
+		img := image.NewNRGBA(image.Rect(0, 0, int(in.W), int(in.H)))
+
+		// Walk chunks covered by the rect. World coords use the
+		// chunkCx = ((wx >> 9) - 0x100) & 0x1ff convention from
+		// noita.hexpat.
+		minWX, minWY := in.WX, in.WY
+		maxWX, maxWY := in.WX+in.W-1, in.WY+in.H-1
+		minCX := minWX >> 9
+		minCY := minWY >> 9
+		maxCX := maxWX >> 9
+		maxCY := maxWY >> 9
+
+		// Cache: chunk_idx → cell-slots blob (262144 u32 little-endian).
+		// Memory: 1 MiB per loaded chunk. Bounded by (maxCX-minCX+1)*
+		// (maxCY-minCY+1) which for a 1024² rect is at most 9 chunks → 9 MiB.
+		type chunkBlob struct {
+			loaded    bool
+			cellSlots []byte // 4 * chunkSide * chunkSide bytes, or nil if chunk unloaded
+		}
+		blobs := make(map[uint64]*chunkBlob)
+
+		blobAt := func(cx, cy int32) *chunkBlob {
+			key := (uint64(uint32(cx)) << 32) | uint64(uint32(cy))
+			if b, ok := blobs[key]; ok {
+				return b
+			}
+			b := &chunkBlob{}
+			blobs[key] = b
+			info := reader.ReadCellAt(cx*chunkSide, cy*chunkSide)
+			if info == nil || info.ChunkPtr == 0 || info.CellSlotsPtr == 0 {
+				return b
+			}
+			buf := make([]byte, 4*chunkSide*chunkSide)
+			if _, err := reader.Ctx.ReadAt(buf, int64(info.CellSlotsPtr)); err != nil {
+				return b
+			}
+			b.loaded = true
+			b.cellSlots = buf
+			return b
+		}
+
+		for cy := minCY; cy <= maxCY; cy++ {
+			for cx := minCX; cx <= maxCX; cx++ {
+				blob := blobAt(cx, cy)
+				if !blob.loaded {
+					continue
+				}
+				// Pixel range within this chunk.
+				cxBaseWX := cx * chunkSide
+				cyBaseWY := cy * chunkSide
+				x0 := minWX
+				if cxBaseWX > x0 {
+					x0 = cxBaseWX
+				}
+				y0 := minWY
+				if cyBaseWY > y0 {
+					y0 = cyBaseWY
+				}
+				x1 := maxWX
+				if cxBaseWX+chunkSide-1 < x1 {
+					x1 = cxBaseWX + chunkSide - 1
+				}
+				y1 := maxWY
+				if cyBaseWY+chunkSide-1 < y1 {
+					y1 = cyBaseWY + chunkSide - 1
+				}
+				for wy := y0; wy <= y1; wy++ {
+					localY := wy - cyBaseWY
+					for wx := x0; wx <= x1; wx++ {
+						localX := wx - cxBaseWX
+						slotOff := (localY*chunkSide + localX) * 4
+						cellPtr := binary.LittleEndian.Uint32(blob.cellSlots[slotOff : slotOff+4])
+						if cellPtr == 0 {
+							// Air — leave transparent.
+							continue
+						}
+						var px [4]byte
+						if _, err := reader.Ctx.ReadAt(px[:], int64(cellPtr)+0x30); err != nil {
+							continue
+						}
+						// BGRA in memory.
+						img.SetNRGBA(int(wx-minWX), int(wy-minWY), color.NRGBA{
+							R: px[2],
+							G: px[1],
+							B: px[0],
+							A: px[3],
+						})
+					}
+				}
+			}
+		}
+
+		var pngBuf bytes.Buffer
+		if err := png.Encode(&pngBuf, img); err != nil {
+			return toolErr(fmt.Errorf("png encode: %w", err))
+		}
+		out := map[string]any{
+			"wx":         in.WX,
+			"wy":         in.WY,
+			"w":          in.W,
+			"h":          in.H,
+			"png_base64": base64.StdEncoding.EncodeToString(pngBuf.Bytes()),
+			"png_bytes":  pngBuf.Len(),
+		}
+		data, _ := json.Marshal(out)
+		return textResult(string(data)), nil, nil
 	})
 }
