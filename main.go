@@ -462,6 +462,7 @@ type model struct {
 	state         *noita.GameState
 	reader        *noita.Reader
 	proc          *process.Process
+	sched         *domainScheduler
 	tab           int
 	tabs          []string
 	width         int
@@ -590,6 +591,7 @@ func initialModel(logBuf *ringLog) model {
 	ov := startOverlay(ctx)
 	return model{
 		state:          &noita.GameState{},
+		sched:          newDomainScheduler(),
 		tabs:           []string{"Player", "Entities", "Wands", "World", "Overlay", "Log"},
 		entityList:     newEntityList(),
 		categoryCounts: make(map[entityCategory]int),
@@ -683,7 +685,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.tryConnect()
 		if m.reader != nil {
-			m.state = m.reader.ReadState()
+			picks := m.sched.pick(m.tab, m.state, time.Time(msg))
+			if len(picks) > 0 {
+				m.state = m.reader.RunDomains(m.state, picks)
+			}
 			m.updateEntityList()
 			m.updateEntityDetails()
 			m.updateOverlay()

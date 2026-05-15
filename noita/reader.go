@@ -9,6 +9,7 @@ import (
 	"math"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/vitaminmoo/memtools/hexpat/runtime"
 )
@@ -17,10 +18,59 @@ import (
 // CellData stride in the CellFactory material array.
 const cellDataStride = 0x290
 
+// Domain identifies a subset of game state that can be read independently.
+type Domain int
+
+const (
+	DomainStatics          Domain = iota // WorldSeed, NgPlusCount, DeathCount, NumOrbsTotal
+	DomainGlobalsAndCamera               // GameGlobals + camera view rect
+	DomainWorldState                     // WorldStateComponent + fungal shifts + lua globals + flags + orbs
+	DomainPlayerCore                     // player entity + DamageModel + Wallet + Char + Inventory2
+	DomainPlayerInventory                // wands, items, wand spell decks (deps PlayerCore)
+	DomainPlayerEffects                  // active GameEffectComponents (deps PlayerCore)
+	DomainEntities                       // full entity list
+)
+
+// AllDomains is the order ReadState() uses for the merged snapshot.
+var AllDomains = []Domain{
+	DomainStatics,
+	DomainGlobalsAndCamera,
+	DomainWorldState,
+	DomainPlayerCore,
+	DomainPlayerInventory,
+	DomainPlayerEffects,
+	DomainEntities,
+}
+
+// String returns a stable name for the domain (for logging / metrics).
+func (d Domain) String() string {
+	switch d {
+	case DomainStatics:
+		return "statics"
+	case DomainGlobalsAndCamera:
+		return "globals"
+	case DomainWorldState:
+		return "world"
+	case DomainPlayerCore:
+		return "player"
+	case DomainPlayerInventory:
+		return "inventory"
+	case DomainPlayerEffects:
+		return "effects"
+	case DomainEntities:
+		return "entities"
+	}
+	return fmt.Sprintf("domain(%d)", int(d))
+}
+
 // GameState holds a snapshot of all interesting game data.
 type GameState struct {
 	Connected bool
 	Error     string
+
+	// Domains records the last time each domain was successfully refreshed.
+	// nil for snapshots produced before any domain has run.
+	Domains map[Domain]time.Time
 
 	WorldSeed    uint32
 	NgPlusCount  int32
@@ -463,100 +513,189 @@ func (r *Reader) ReadFungalShifts(vec *StdVectorHeader) []FungalShift {
 	return out
 }
 
+// ReadState reads a complete game-state snapshot by running every domain.
+// Equivalent to RunDomains(nil, AllDomains).
 func (r *Reader) ReadState() *GameState {
-	gs := &GameState{Connected: true}
+	return r.RunDomains(nil, AllDomains)
+}
 
-	// Read static globals
-	if v, err := ReadGWorldSeed(r.Ctx); err == nil {
-		gs.WorldSeed = v
-	} else {
-		gs.Error = fmt.Sprintf("read world seed: %v", err)
-		gs.Connected = false
-		return gs
+// RunDomains refreshes the requested domains, carrying over fields from prev
+// for domains that aren't being refreshed this call. If prev is nil, returns
+// a fresh snapshot.
+//
+// If DomainStatics is requested and the connect-canary read fails, the
+// returned state has Connected=false and remaining domains are skipped.
+func (r *Reader) RunDomains(prev *GameState, domains []Domain) *GameState {
+	gs := &GameState{Connected: true}
+	if prev != nil {
+		*gs = *prev
+		gs.Connected = true
+		gs.Error = ""
+	}
+	// Copy Domains map so callers' prior snapshots are not mutated.
+	domainTimes := make(map[Domain]time.Time, len(gs.Domains)+len(domains))
+	for k, v := range gs.Domains {
+		domainTimes[k] = v
+	}
+	gs.Domains = domainTimes
+
+	// Statics first: it carries the connect-canary check.
+	requested := domainSet(domains)
+	if requested[DomainStatics] {
+		if err := r.readStatics(gs); err != nil {
+			return gs
+		}
+		gs.Domains[DomainStatics] = time.Now()
 	}
 
+	// Player-related domains share the EntityManager pointer; resolve once.
+	var em *EntityManager
+	if requested[DomainPlayerCore] || requested[DomainPlayerInventory] || requested[DomainPlayerEffects] {
+		em = r.readEM()
+	}
+
+	now := time.Now()
+	for _, d := range domains {
+		switch d {
+		case DomainStatics:
+			// already handled above
+			continue
+		case DomainGlobalsAndCamera:
+			r.readGlobalsAndCamera(gs)
+		case DomainWorldState:
+			r.readWorldState(gs)
+		case DomainPlayerCore:
+			r.readPlayerCore(gs, em)
+		case DomainPlayerInventory:
+			r.readPlayerInventory(gs, em)
+		case DomainPlayerEffects:
+			r.readPlayerEffectsDomain(gs, em)
+		case DomainEntities:
+			gs.Entities = r.ReadEntityList()
+		default:
+			continue
+		}
+		gs.Domains[d] = now
+	}
+	return gs
+}
+
+func domainSet(domains []Domain) map[Domain]bool {
+	m := make(map[Domain]bool, len(domains))
+	for _, d := range domains {
+		m[d] = true
+	}
+	return m
+}
+
+// readStatics fills WorldSeed/NgPlusCount/DeathCount/NumOrbsTotal. WorldSeed
+// doubles as the connect-canary: if it fails to read, mark disconnected.
+func (r *Reader) readStatics(gs *GameState) error {
+	v, err := ReadGWorldSeed(r.Ctx)
+	if err != nil {
+		gs.Error = fmt.Sprintf("read world seed: %v", err)
+		gs.Connected = false
+		return err
+	}
+	gs.WorldSeed = v
 	gs.NgPlusCount, _ = ReadGNgPlusCount(r.Ctx)
 	gs.DeathCount, _ = ReadGDeathCount(r.Ctx)
 	gs.NumOrbsTotal, _ = ReadGNumOrbsTotal(r.Ctx)
+	return nil
+}
 
-	// Read GameGlobals (pointer indirection)
+func (r *Reader) readGlobalsAndCamera(gs *GameState) {
 	gs.Globals, _ = ReadGGameGlobals(r.Ctx)
-	if gs.Globals != nil {
-		// Read camera from WorldManager view rect
-		if vr, _ := gs.Globals.ReadPWorldManager(r.Ctx); vr != nil {
-			gs.ViewW = vr.ViewWidth
-			gs.ViewH = vr.ViewHeight
-			gs.CameraX = vr.ViewX + vr.ViewWidth*0.5
-			gs.CameraY = vr.ViewY + vr.ViewHeight*0.5
-		}
+	if gs.Globals == nil {
+		return
 	}
+	vr, _ := gs.Globals.ReadPWorldManager(r.Ctx)
+	if vr == nil {
+		return
+	}
+	gs.ViewW = vr.ViewWidth
+	gs.ViewH = vr.ViewHeight
+	gs.CameraX = vr.ViewX + vr.ViewWidth*0.5
+	gs.CameraY = vr.ViewY + vr.ViewHeight*0.5
+}
 
-	// Read WorldStateComponent (pointer indirection)
+func (r *Reader) readWorldState(gs *GameState) {
 	gs.WorldState, _ = ReadGWorldState(r.Ctx)
-	if gs.WorldState != nil {
-		gs.FungalShifts = r.ReadFungalShifts(&gs.WorldState.ChangedMaterials)
-		gs.LuaGlobals = r.ReadLuaGlobals(&gs.WorldState.LuaGlobals)
-		gs.Flags = r.ReadMsvcStringVector(&gs.WorldState.Flags)
-		if elems := gs.WorldState.OrbsFoundThisrun.Elements; len(elems) > 0 {
-			gs.OrbsFoundThisRun = append([]int32(nil), elems...)
-		}
+	if gs.WorldState == nil {
+		gs.FungalShifts = nil
+		gs.LuaGlobals = nil
+		gs.Flags = nil
+		gs.OrbsFoundThisRun = nil
+		return
 	}
+	gs.FungalShifts = r.ReadFungalShifts(&gs.WorldState.ChangedMaterials)
+	gs.LuaGlobals = r.ReadLuaGlobals(&gs.WorldState.LuaGlobals)
+	gs.Flags = r.ReadMsvcStringVector(&gs.WorldState.Flags)
+	if elems := gs.WorldState.OrbsFoundThisrun.Elements; len(elems) > 0 {
+		gs.OrbsFoundThisRun = append([]int32(nil), elems...)
+	} else {
+		gs.OrbsFoundThisRun = nil
+	}
+}
 
-	// Find player entity via DeathMatchApp -> player_entities vector
+func (r *Reader) readPlayerCore(gs *GameState, em *EntityManager) {
+	gs.PlayerEntity = nil
+	gs.PlayerHP = nil
+	gs.PlayerWallet = nil
+	gs.PlayerChar = nil
+	gs.PlayerInv = nil
+
 	dma, _ := ReadGDeathMatchApp(r.Ctx)
 	if dma == nil || len(dma.PlayerEntities.Elements) == 0 {
-		return gs
+		return
 	}
-
 	playerEntityPtr := dma.PlayerEntities.Elements[0]
 	if playerEntityPtr == 0 {
-		return gs
+		return
 	}
-
-	gs.PlayerEntity, _ = ReadEntity(r.Ctx, uintptr(playerEntityPtr))
-	if gs.PlayerEntity == nil {
-		return gs
+	pe, _ := ReadEntity(r.Ctx, uintptr(playerEntityPtr))
+	gs.PlayerEntity = pe
+	if pe == nil || em == nil {
+		return
 	}
+	gs.PlayerHP = readComponent[DamageModelComponent](r, em, pe.SlotIndex, TypeIDDamageModelComponent, ReadDamageModelComponent)
+	gs.PlayerWallet = readComponent[WalletComponent](r, em, pe.SlotIndex, TypeIDWalletComponent, ReadWalletComponent)
+	gs.PlayerChar = readComponent[CharacterDataComponent](r, em, pe.SlotIndex, TypeIDCharacterDataComponent, ReadCharacterDataComponent)
+	gs.PlayerInv = readComponent[Inventory2Component](r, em, pe.SlotIndex, TypeIDInventory2Component, ReadInventory2Component)
+}
 
-	em := r.readEM()
-	if em == nil {
-		return gs
+func (r *Reader) readPlayerInventory(gs *GameState, em *EntityManager) {
+	gs.Wands = nil
+	gs.Items = nil
+	gs.WandSpells = nil
+	if em == nil || gs.PlayerEntity == nil {
+		return
 	}
-
-	// Read components for the player entity
-	gs.PlayerHP = readComponent[DamageModelComponent](r, em, gs.PlayerEntity.SlotIndex, TypeIDDamageModelComponent, ReadDamageModelComponent)
-	gs.PlayerWallet = readComponent[WalletComponent](r, em, gs.PlayerEntity.SlotIndex, TypeIDWalletComponent, ReadWalletComponent)
-	gs.PlayerChar = readComponent[CharacterDataComponent](r, em, gs.PlayerEntity.SlotIndex, TypeIDCharacterDataComponent, ReadCharacterDataComponent)
-	gs.PlayerInv = readComponent[Inventory2Component](r, em, gs.PlayerEntity.SlotIndex, TypeIDInventory2Component, ReadInventory2Component)
-
-	// Read inventory
-	allItems := r.findInventoryItems(em, gs.PlayerEntity)
-	for _, item := range allItems {
+	for _, item := range r.findInventoryItems(em, gs.PlayerEntity) {
 		if item.IsWand() {
 			gs.Wands = append(gs.Wands, item)
 		} else {
 			gs.Items = append(gs.Items, item)
 		}
 	}
-
-	// Active status effects (parented under the player).
-	gs.PlayerEffects = r.ReadPlayerEffects(em, gs.PlayerEntity)
-
-	// Loaded spell decks per wand (parallel to gs.Wands).
-	if len(gs.Wands) > 0 {
-		gs.WandSpells = make([][]string, len(gs.Wands))
-		for i, w := range gs.Wands {
-			if w == nil || w.Entity == nil {
-				continue
-			}
-			gs.WandSpells[i] = r.ReadWandSpellNames(em, w.Entity)
-		}
+	if len(gs.Wands) == 0 {
+		return
 	}
+	gs.WandSpells = make([][]string, len(gs.Wands))
+	for i, w := range gs.Wands {
+		if w == nil || w.Entity == nil {
+			continue
+		}
+		gs.WandSpells[i] = r.ReadWandSpellNames(em, w.Entity)
+	}
+}
 
-	// Read all entities
-	gs.Entities = r.ReadEntityList()
-
-	return gs
+func (r *Reader) readPlayerEffectsDomain(gs *GameState, em *EntityManager) {
+	gs.PlayerEffects = nil
+	if em == nil || gs.PlayerEntity == nil {
+		return
+	}
+	gs.PlayerEffects = r.ReadPlayerEffects(em, gs.PlayerEntity)
 }
 
 // readMaterialName reads the material name for a given material ID from CellFactory.
@@ -1447,7 +1586,14 @@ func (r *Reader) findInventoryItems(em *EntityManager, player *Entity) []*Invent
 	return items
 }
 
-// ReadEntityList reads all entities from the EntityManager and returns summaries.
+// entityHeaderSize is the on-the-wire size of the Entity struct (matches
+// ReadEntity's buf[152]byte). All header fields live within this window.
+const entityHeaderSize = 152
+
+// ReadEntityList reads all entities from the EntityManager and returns
+// summaries. The entity-pointer table and all entity-header reads are
+// coalesced into two batched syscalls; per-entity component lookups still
+// use the in-frame bufCache.
 func (r *Reader) ReadEntityList() []*EntitySummary {
 	em := r.readEM()
 	if em == nil {
@@ -1455,8 +1601,6 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 	}
 
 	// Cache component buffer metadata for the duration of this call.
-	// This eliminates ~200 syscalls/entity for buffer-level fields that
-	// don't change between entities.
 	r.buildBufferCache(em)
 	defer func() { r.bufCache = nil }()
 
@@ -1465,64 +1609,110 @@ func (r *Reader) ReadEntityList() []*EntitySummary {
 		return nil
 	}
 
-	// Batch read entity pointers
+	// Syscall 1: entity-pointer table.
 	ptrBuf := make([]byte, count*4)
 	if _, err := r.Ctx.ReadAt(ptrBuf, int64(em.EntityArray.BeginPtr)); err != nil {
 		return nil
 	}
 
-	var summaries []*EntitySummary
+	// Syscall 2 (chunked): batch all entity headers. Each header is 152 bytes,
+	// so 1000 entities = 152 KB across a single process_vm_readv (with one
+	// follow-up if we exceed UIO_MAXIOV iovecs).
+	type entRef struct {
+		ptr uint32
+		buf []byte
+	}
+	refs := make([]entRef, 0, count)
+	coll := runtime.NewCollector(r.Ctx)
 	for i := uint32(0); i < count; i++ {
 		ePtr := binary.LittleEndian.Uint32(ptrBuf[i*4 : i*4+4])
 		if ePtr == 0 {
 			continue
 		}
-		// Use lazy reader — only read the fields we need
-		er := NewEntityReader(r.Ctx, uintptr(ePtr))
-		pendingKill, _ := er.PendingKill()
-		if pendingKill >= 1 {
+		refs = append(refs, entRef{ptr: ePtr, buf: coll.Add(uintptr(ePtr), entityHeaderSize)})
+	}
+	if err := coll.Flush(); err != nil {
+		// Batch failed (rare; usually a transient unmapped page). Fall back to
+		// per-entity reads so we still return whatever's currently readable.
+		ptrs := make([]uint32, len(refs))
+		for i, ref := range refs {
+			ptrs[i] = ref.ptr
+		}
+		return r.readEntityListPerEntity(em, ptrs)
+	}
+
+	summaries := make([]*EntitySummary, 0, len(refs))
+	for _, ref := range refs {
+		ent := decodeEntityHeader(ref.buf)
+		if ent.PendingKill >= 1 {
 			continue
 		}
-		slotIndex, _ := er.SlotIndex()
-		entityId, _ := er.EntityId()
-		posX, _ := er.PosX()
-		posY, _ := er.PosY()
-		parentPtr, _ := er.ParentEntityPtr()
-		nameStr, _ := er.Name().Read()
-
-		// Build a minimal Entity for the summary (avoids full eager read)
-		entity := &Entity{
-			EntityId:        entityId,
-			SlotIndex:       slotIndex,
-			PosX:            posX,
-			PosY:            posY,
-			ParentEntityPtr: parentPtr,
-		}
-		if nameStr != nil {
-			entity.Name = *nameStr
-		}
-
-		name := entity.Name.FormatMsvcString(r.Ctx)
-		compIDs := r.FindEntityComponentIDs(em, slotIndex)
-		summary := &EntitySummary{
-			Entity:           entity,
-			Name:             name,
-			Ptr:              ePtr,
-			HasHP:            r.hasComponent(em, slotIndex, TypeIDDamageModelComponent),
-			HasWallet:        r.hasComponent(em, slotIndex, TypeIDWalletComponent),
-			HasAbility:       r.hasComponent(em, slotIndex, TypeIDAbilityComponent),
-			HasCharData:      r.hasComponent(em, slotIndex, TypeIDCharacterDataComponent),
-			Hitbox:           readComponent[HitboxComponent](r, em, slotIndex, TypeIDHitboxComponent, ReadHitboxComponent),
-			CollisionTrigger: readComponent[CollisionTriggerComponent](r, em, slotIndex, TypeIDCollisionTriggerComponent, ReadCollisionTriggerComponent),
-			Sprite:           readComponent[SpriteComponent](r, em, slotIndex, TypeIDSpriteComponent, ReadSpriteComponent),
-			Lua:              readComponent[LuaComponent](r, em, slotIndex, TypeIDLuaComponent, ReadLuaComponent),
-			Item:             readComponent[ItemComponent](r, em, slotIndex, TypeIDItemComponent, ReadItemComponent),
-			Contents:         r.readPotionContents(em, slotIndex),
-			ComponentIDs:     compIDs,
-		}
-		summaries = append(summaries, summary)
+		summaries = append(summaries, r.buildEntitySummary(em, ref.ptr, ent))
 	}
 	return summaries
+}
+
+// readEntityListPerEntity is the fallback used when the batched header read
+// fails; it reproduces the original per-entity ReadAt path.
+func (r *Reader) readEntityListPerEntity(em *EntityManager, ptrs []uint32) []*EntitySummary {
+	summaries := make([]*EntitySummary, 0, len(ptrs))
+	for _, p := range ptrs {
+		ent, _ := ReadEntity(r.Ctx, uintptr(p))
+		if ent == nil || ent.PendingKill >= 1 {
+			continue
+		}
+		summaries = append(summaries, r.buildEntitySummary(em, p, ent))
+	}
+	return summaries
+}
+
+func (r *Reader) buildEntitySummary(em *EntityManager, ePtr uint32, ent *Entity) *EntitySummary {
+	return &EntitySummary{
+		Entity:           ent,
+		Name:             ent.Name.FormatMsvcString(r.Ctx),
+		Ptr:              ePtr,
+		HasHP:            r.hasComponent(em, ent.SlotIndex, TypeIDDamageModelComponent),
+		HasWallet:        r.hasComponent(em, ent.SlotIndex, TypeIDWalletComponent),
+		HasAbility:       r.hasComponent(em, ent.SlotIndex, TypeIDAbilityComponent),
+		HasCharData:      r.hasComponent(em, ent.SlotIndex, TypeIDCharacterDataComponent),
+		Hitbox:           readComponent[HitboxComponent](r, em, ent.SlotIndex, TypeIDHitboxComponent, ReadHitboxComponent),
+		CollisionTrigger: readComponent[CollisionTriggerComponent](r, em, ent.SlotIndex, TypeIDCollisionTriggerComponent, ReadCollisionTriggerComponent),
+		Sprite:           readComponent[SpriteComponent](r, em, ent.SlotIndex, TypeIDSpriteComponent, ReadSpriteComponent),
+		Lua:              readComponent[LuaComponent](r, em, ent.SlotIndex, TypeIDLuaComponent, ReadLuaComponent),
+		Item:             readComponent[ItemComponent](r, em, ent.SlotIndex, TypeIDItemComponent, ReadItemComponent),
+		Contents:         r.readPotionContents(em, ent.SlotIndex),
+		ComponentIDs:     r.FindEntityComponentIDs(em, ent.SlotIndex),
+	}
+}
+
+// decodeEntityHeader mirrors ReadEntity's decode against a pre-fetched
+// 152-byte buffer. The Name MsvcString header is extracted from the buffer
+// directly; FormatMsvcString resolves heap-allocated string content on
+// demand (and most entity names are inline so need no further reads).
+func decodeEntityHeader(buf []byte) *Entity {
+	e := &Entity{
+		EntityId:    int32(binary.LittleEndian.Uint32(buf[0:])),
+		SlotIndex:   int32(binary.LittleEndian.Uint32(buf[4:])),
+		Unknown08:   binary.LittleEndian.Uint32(buf[8:]),
+		PendingKill: int32(binary.LittleEndian.Uint32(buf[12:])),
+		Flags10:     binary.LittleEndian.Uint32(buf[16:]),
+	}
+	copy(e.Name.Data[:], buf[20:36])
+	e.Name.Length = binary.LittleEndian.Uint32(buf[36:])
+	e.Name.Capacity = binary.LittleEndian.Uint32(buf[40:])
+	e.Unknown2c = binary.LittleEndian.Uint32(buf[44:])
+	copy(e.TagBitset[:], buf[48:112])
+	e.PosX = math.Float32frombits(binary.LittleEndian.Uint32(buf[112:]))
+	e.PosY = math.Float32frombits(binary.LittleEndian.Uint32(buf[116:]))
+	e.RotCos = math.Float32frombits(binary.LittleEndian.Uint32(buf[120:]))
+	e.RotSin = math.Float32frombits(binary.LittleEndian.Uint32(buf[124:]))
+	e.RotNegSin = math.Float32frombits(binary.LittleEndian.Uint32(buf[128:]))
+	e.RotCos2 = math.Float32frombits(binary.LittleEndian.Uint32(buf[132:]))
+	e.ScaleX = math.Float32frombits(binary.LittleEndian.Uint32(buf[136:]))
+	e.ScaleY = math.Float32frombits(binary.LittleEndian.Uint32(buf[140:]))
+	e.ChildrenPtr = binary.LittleEndian.Uint32(buf[144:])
+	e.ParentEntityPtr = binary.LittleEndian.Uint32(buf[148:])
+	return e
 }
 
 // ReadEntityDetails reads full component data for a specific entity.
