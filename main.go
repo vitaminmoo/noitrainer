@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -974,6 +975,7 @@ func (m model) viewPlayer() string {
 		if e := m.state.PlayerEntity; e != nil {
 			rows := []string{
 				row("Position", posStyle.Render(fmt.Sprintf("%.1f, %.1f", e.PosX, e.PosY))),
+				row("Parallel World", posStyle.Render(parallelWorldLabel(e.PosX))),
 				row("Entity ID", fmt.Sprintf("%d", e.EntityId)),
 			}
 			if c := m.state.PlayerChar; c != nil {
@@ -1595,6 +1597,22 @@ func equalizeBoxes(boxes []string) []string {
 		boxes[i] = lipgloss.Place(maxW, maxH, lipgloss.Left, lipgloss.Top, b)
 	}
 	return boxes
+}
+
+// parallelWorldLabel returns a short description of which parallel world the
+// given x-coordinate falls in. Each parallel world is 35840 px wide (70 chunks
+// × 512 px); the main world is centered on x=0.
+func parallelWorldLabel(x float32) string {
+	const worldWidth = 35840.0
+	idx := int(math.Floor((float64(x) + worldWidth/2) / worldWidth))
+	switch {
+	case idx == 0:
+		return "Main (0)"
+	case idx > 0:
+		return fmt.Sprintf("East +%d", idx)
+	default:
+		return fmt.Sprintf("West %d", idx)
+	}
 }
 
 func boolStr(b bool) string {
