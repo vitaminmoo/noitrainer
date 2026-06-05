@@ -7,7 +7,6 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/modelcontextprotocol/go-sdk v1.5.0
-	github.com/vitaminmoo/go-overlay v0.0.0
 	github.com/vitaminmoo/memtools v0.0.0-20260515054114-853768cad1fc
 )
 
@@ -37,12 +36,11 @@ require (
 	github.com/sahilm/fuzzy v0.1.1 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
+	github.com/vitaminmoo/go-overlay v0.0.0-20260605164942-e92358fce0fa // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/image v0.36.0 // indirect
+	golang.org/x/image v0.41.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
-
-replace github.com/vitaminmoo/go-overlay => /home/vitaminmoo/repos/go-overlay
