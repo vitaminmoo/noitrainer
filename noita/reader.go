@@ -598,7 +598,7 @@ func (r *Reader) readStatics(gs *GameState) error {
 		return err
 	}
 	gs.WorldSeed = v
-	gs.NgPlusCount, _ = ReadGNgPlusCount(r.Ctx)
+	gs.NgPlusCount, _ = ReadGNewGamePlusCount(r.Ctx)
 	gs.DeathCount, _ = ReadGDeathCount(r.Ctx)
 	gs.NumOrbsTotal, _ = ReadGNumOrbsTotal(r.Ctx)
 	return nil
@@ -620,7 +620,7 @@ func (r *Reader) readGlobalsAndCamera(gs *GameState) {
 }
 
 func (r *Reader) readWorldState(gs *GameState) {
-	gs.WorldState, _ = ReadGWorldState(r.Ctx)
+	gs.WorldState, _ = ReadGWorldStateComponent(r.Ctx)
 	if gs.WorldState == nil {
 		gs.FungalShifts = nil
 		gs.LuaGlobals = nil

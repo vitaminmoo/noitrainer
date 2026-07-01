@@ -251,7 +251,7 @@ func registerRuntimeTools(s *mcp.Server) {
 		if err != nil {
 			return toolErr(err)
 		}
-		v, err := noita.ReadGNgPlusCount(reader.Ctx)
+		v, err := noita.ReadGNewGamePlusCount(reader.Ctx)
 		if err != nil {
 			return toolErr(fmt.Errorf("read ng+ count: %w", err))
 		}

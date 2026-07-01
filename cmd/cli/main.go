@@ -1243,7 +1243,7 @@ func cmdPixelScenes() {
 
 func cmdNgPlus() {
 	reader, _ := connect()
-	v, err := noita.ReadGNgPlusCount(reader.Ctx)
+	v, err := noita.ReadGNewGamePlusCount(reader.Ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Read failed: %v\n", err)
 		os.Exit(1)
