@@ -459,6 +459,10 @@ func (i entityItem) FilterValue() string {
 
 type tickMsg time.Time
 
+// stateMsg delivers the result of an off-thread RunDomains read back to the
+// bubbletea event loop.
+type stateMsg struct{ state *noita.GameState }
+
 type model struct {
 	state         *noita.GameState
 	reader        *noita.Reader
@@ -477,6 +481,7 @@ type model struct {
 	overlay       *overlayScene
 	overlayCancel context.CancelFunc
 	logBuf        *ringLog
+	reading       bool // a RunDomains read is in flight off the UI thread
 
 	// Overlay tab state
 	overlayCats    map[entityCategory]bool // which categories to render
@@ -685,16 +690,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.tryConnect()
-		if m.reader != nil {
+		// Run the memory read off the UI thread so a slow or corrupt read can
+		// never freeze the TUI. Only one read is in flight at a time.
+		if m.reader != nil && !m.reading {
 			picks := m.sched.pick(m.tab, m.state, time.Time(msg))
 			if len(picks) > 0 {
-				m.state = m.reader.RunDomains(m.state, picks)
+				m.reading = true
+				reader, prev := m.reader, m.state
+				read := func() tea.Msg {
+					return stateMsg{state: reader.RunDomains(prev, picks)}
+				}
+				return m, tea.Batch(read, tickCmd())
 			}
-			m.updateEntityList()
-			m.updateEntityDetails()
-			m.updateOverlay()
 		}
 		return m, tickCmd()
+
+	case stateMsg:
+		m.reading = false
+		m.state = msg.state
+		m.updateEntityList()
+		m.updateEntityDetails()
+		m.updateOverlay()
+		return m, nil
 
 	default:
 		// Route other messages (e.g. FilterMatchesMsg) to the entity list.
@@ -898,7 +915,13 @@ func (m *model) updateOverlay() {
 
 func (m *model) tryConnect() {
 	if m.proc != nil {
-		return
+		if processAlive(m.proc.PID) {
+			return
+		}
+		// Game exited — drop the stale handle and search again below.
+		m.proc = nil
+		m.reader = nil
+		m.state = nil
 	}
 	procs, err := process.FromName("noita.exe")
 	if err != nil {
@@ -909,6 +932,12 @@ func (m *model) tryConnect() {
 	m.proc = procs[0]
 	m.reader = noita.NewReader(m.proc)
 	m.err = nil
+}
+
+// processAlive reports whether a PID is still running.
+func processAlive(pid int) bool {
+	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+	return err == nil
 }
 
 // ── View ───────────────────────────────────────────────────────────
