@@ -4410,18 +4410,3 @@ u8   g_logFlush               @ 0x01204FE0 [[color("AAAAAA"), comment("log flush
 s32  g_logLevel               @ 0x01152518 [[color("AAAAAA"), comment("log level")]];
 s32  g_maxComponent           @ 0x01152FF0 [[color("AAAAAA"), comment("max component count")]];
 u8   g_debugSettings          @ 0x01207E20 [[color("AAAAAA"), comment("debug settings (struct base, first byte)")]];
-
-// Stable singletons (same heap address across observed runs)
-GameGlobals   gameglobals_heap   @ 0x01BBAE58;
-DeathMatchApp deathmatchapp_heap @ 0x01B93510;
-EntityManager entitymanager_heap @ 0x06BA7F88;
-
-// Per-run heap objects — uncomment the set matching your dump.
-// Dump 1 (noita.exe_1773868853_24788):
-Entity player_entity             @ 0x1673E6C8;
-DamageModelComponent player_dmg  @ 0x3334B780;
-AbilityComponent wand0           @ 0x0648EED0;
-AbilityComponent wand1           @ 0x0648F2B0;
-// Dump 2 (noita.exe_1773868900_25625):
-// Entity player_entity           @ 0x334DF910;
-// DamageModelComponent player_dmg @ 0x3352FC58;
