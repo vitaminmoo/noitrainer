@@ -1,3 +1,5 @@
 # Editor / tooling local state
 .serena/
-noita-mcp
+
+# Built binary (repo-root only, not the cmd/noita-mcp source dir)
+/noita-mcp
