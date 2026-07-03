@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/vitaminmoo/go-overlay v0.0.0-20260605164942-e92358fce0fa
-	github.com/vitaminmoo/memtools v0.0.0-20260627005635-ae095b0b62b3
+	github.com/vitaminmoo/memtools v0.0.0-20260703032246-e6b8a66bf518
 )
 
 require (
