@@ -231,6 +231,52 @@ func drawPhysicsObject(img *image.RGBA, o *PhysicsObject) {
 	}
 }
 
+// RenderMaterialMap renders a per-pixel lookup image the same size as Render's
+// output, encoding which material occupies each world pixel:
+//
+//	R = id & 0xff, G = id >> 8   1-based id from ids; 0 means empty
+//	B = 1 when the cell carries a custom colour, else 0
+//
+// It is a data channel, not something to look at: a viewer can read a pixel to
+// name the material under the cursor, or scan for one id to highlight every
+// cell of a material. Only cells are included, not rigid bodies, so it stays
+// consistent with per-material cell counts.
+func (w *World) RenderMaterialMap(ids map[string]int) *image.RGBA {
+	b := w.Bounds()
+	img := image.NewRGBA(b)
+
+	for _, coord := range w.sortedCoords() {
+		c := w.Chunks[coord]
+		colorIdx := c.CustomColorIndex()
+		width := int(c.Width)
+
+		for i, cell := range c.Cells {
+			if cell == 0 {
+				continue
+			}
+			mi, _ := CellMaterial(cell)
+			if int(mi) >= len(c.MaterialNames) {
+				continue
+			}
+			id := ids[c.MaterialNames[mi]]
+			if id == 0 {
+				continue
+			}
+			custom := uint8(0)
+			if colorIdx[i] >= 0 {
+				custom = 1
+			}
+			img.SetRGBA(coord.X+i%width, coord.Y+i/width, color.RGBA{
+				R: uint8(id),
+				G: uint8(id >> 8),
+				B: custom,
+				A: 255,
+			})
+		}
+	}
+	return img
+}
+
 // WritePNG encodes an image to a file.
 func WritePNG(path string, img image.Image) error {
 	f, err := os.Create(path)

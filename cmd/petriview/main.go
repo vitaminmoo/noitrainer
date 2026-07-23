@@ -46,6 +46,8 @@ type jsonTotals struct {
 
 // jsonMatUse is a world-wide material tally, for the legend.
 type jsonMatUse struct {
+	// ID is this material's value in the material-map image; 0 = not mapped.
+	ID    int    `json:"id"`
 	Name  string `json:"name"`
 	Cells int    `json:"cells"`
 	Color string `json:"color"`
@@ -166,6 +168,19 @@ func main() {
 	}
 
 	index := buildIndex(w, palette)
+
+	// The world-wide material list defines the id space used by the lookup
+	// map, so a viewer can turn a pixel back into a material name.
+	ids := make(map[string]int, len(index.Materials))
+	for i := range index.Materials {
+		index.Materials[i].ID = i + 1
+		ids[index.Materials[i].Name] = i + 1
+	}
+	mapPath := *out + ".map.png"
+	if err := noitasave.WritePNG(mapPath, w.RenderMaterialMap(ids)); err != nil {
+		fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
+		os.Exit(1)
+	}
 	jsonPath := *out + ".json"
 	blob, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
@@ -180,13 +195,14 @@ func main() {
 	b := img.Bounds()
 	fmt.Printf("%s  %dx%d px, world (%d,%d)-(%d,%d)\n",
 		pngPath, b.Dx(), b.Dy(), b.Min.X, b.Min.Y, b.Max.X, b.Max.Y)
+	fmt.Printf("%s  material lookup map\n", mapPath)
 	fmt.Printf("%s  %d chunks, %d bodies, %d joints, %d materials, %d solid cells\n",
 		jsonPath, index.Totals.Chunks, index.Totals.Objects, index.Totals.Joints,
 		len(index.Materials), index.Totals.SolidCells)
 
 	if *writeHTML {
 		htmlPath := *out + ".html"
-		if err := writeExplorer(htmlPath, pngPath, index); err != nil {
+		if err := writeExplorer(htmlPath, pngPath, mapPath, index); err != nil {
 			fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
 			os.Exit(1)
 		}

@@ -13,8 +13,12 @@ import (
 	"strings"
 )
 
-func writeExplorer(path, pngPath string, index jsonWorld) error {
+func writeExplorer(path, pngPath, mapPath string, index jsonWorld) error {
 	pngBytes, err := os.ReadFile(pngPath)
+	if err != nil {
+		return err
+	}
+	mapBytes, err := os.ReadFile(mapPath)
 	if err != nil {
 		return err
 	}
@@ -25,8 +29,11 @@ func writeExplorer(path, pngPath string, index jsonWorld) error {
 
 	var b strings.Builder
 	b.WriteString(explorerHead)
-	fmt.Fprintf(&b, "<script>\nconst WORLD = %s;\nconst IMG = \"data:image/png;base64,%s\";\n</script>\n",
-		indexJSON, base64.StdEncoding.EncodeToString(pngBytes))
+	fmt.Fprintf(&b, "<script>\nconst WORLD = %s;\nconst IMG = \"data:image/png;base64,%s\";\n"+
+		"const MAP = \"data:image/png;base64,%s\";\n</script>\n",
+		indexJSON,
+		base64.StdEncoding.EncodeToString(pngBytes),
+		base64.StdEncoding.EncodeToString(mapBytes))
 	b.WriteString(explorerBody)
 
 	return os.WriteFile(path, []byte(b.String()), 0o644)
@@ -120,12 +127,71 @@ const explorerBody = `
     <label><input type="checkbox" id="tBodies" checked>body markers</label>
     <label><input type="checkbox" id="tLabels">labels</label>
     <label><input type="checkbox" id="tSmooth">smooth</label>
+    <label><input type="checkbox" id="tDim">dim others</label>
+    <label id="clearHl" style="display:none">clear highlight ✕</label>
   </div>
 </div>
 <script>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const B = WORLD.bounds;
 const img = new Image();
+const mapImg = new Image();
+
+// Per-world-pixel material lookup, decoded from the map image once.
+// ids[i] is a 1-based index into WORLD.materials; 0 is empty space.
+let ids = null, customFlag = null;
+const byId = new Map();
+for (const m of WORLD.materials) byId.set(m.id, m);
+let hlMaterial = null, hlCanvas = null;
+
+function decodeMap() {
+  const c = document.createElement('canvas');
+  c.width = B.w; c.height = B.h;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(mapImg, 0, 0);
+  const px = g.getImageData(0, 0, B.w, B.h).data;
+  ids = new Uint16Array(B.w * B.h);
+  customFlag = new Uint8Array(B.w * B.h);
+  for (let i = 0, p = 0; i < ids.length; i++, p += 4) {
+    ids[i] = px[p] | (px[p + 1] << 8);
+    customFlag[i] = px[p + 2];
+  }
+}
+
+// Material at a world coordinate, or null outside the map / on empty space.
+function materialAt(wx, wy) {
+  if (!ids) return null;
+  const x = Math.floor(wx) - B.x, y = Math.floor(wy) - B.y;
+  if (x < 0 || y < 0 || x >= B.w || y >= B.h) return null;
+  const i = y * B.w + x;
+  const m = byId.get(ids[i]);
+  return m ? { mat: m, custom: customFlag[i] === 1 } : null;
+}
+
+// Build a highlight layer marking every pixel of one material. Done once per
+// selection (a full scan of the map) and then reused as an image.
+function buildHighlight(m) {
+  if (!ids) return null;
+  const c = document.createElement('canvas');
+  c.width = B.w; c.height = B.h;
+  const g = c.getContext('2d');
+  const out = g.createImageData(B.w, B.h);
+  const d = out.data;
+  for (let i = 0, p = 0; i < ids.length; i++, p += 4) {
+    if (ids[i] === m.id) {
+      d[p] = 255; d[p + 1] = 60; d[p + 2] = 240; d[p + 3] = 235;
+    }
+  }
+  g.putImageData(out, 0, 0);
+  return c;
+}
+
+function setHighlight(m) {
+  hlMaterial = m;
+  hlCanvas = m ? buildHighlight(m) : null;
+  document.getElementById('clearHl').style.display = m ? '' : 'none';
+  draw();
+}
 let view = { x: B.x, y: B.y, scale: 1 }; // world coords at canvas origin
 let sel = null, hoverBody = null;
 
@@ -163,6 +229,14 @@ function draw() {
   ctx.imageSmoothingEnabled = document.getElementById('tSmooth').checked;
   const [ox, oy] = w2s(B.x, B.y);
   ctx.drawImage(img, ox, oy, B.w * view.scale, B.h * view.scale);
+
+  if (hlCanvas) {
+    if (document.getElementById('tDim').checked) {
+      ctx.fillStyle = '#000000b0';
+      ctx.fillRect(ox, oy, B.w * view.scale, B.h * view.scale);
+    }
+    ctx.drawImage(hlCanvas, ox, oy, B.w * view.scale, B.h * view.scale);
+  }
 
   if (document.getElementById('tGrid').checked) {
     ctx.lineWidth = 1;
@@ -211,8 +285,15 @@ cv.addEventListener('mousemove', e => {
   const [wx, wy] = s2w(e.offsetX, e.offsetY);
   const cs = WORLD.chunkSize;
   const cx = Math.floor(wx / cs) * cs, cy = Math.floor(wy / cs) * cs;
+  const hit = materialAt(wx, wy);
+  let matLine = 'material <b>-</b>';
+  if (hit) {
+    matLine = 'material <b>' + hit.mat.name + '</b>' +
+      (hit.custom ? ' <i>(custom colour)</i>' : '') +
+      ' <span class="sw" style="display:inline-block;background:' + hit.mat.color + '"></span>';
+  }
   document.getElementById('hud').innerHTML =
-    'world <b>' + Math.floor(wx) + ', ' + Math.floor(wy) + '</b><br>' +
+    matLine + '<br>world <b>' + Math.floor(wx) + ', ' + Math.floor(wy) + '</b><br>' +
     'chunk <b>' + cx + ', ' + cy + '</b><br>zoom <b>' + view.scale.toFixed(2) + '×</b>';
 
   // Nearest body within a few screen pixels.
@@ -237,8 +318,10 @@ cv.addEventListener('wheel', e => {
 cv.addEventListener('click', () => {
   if (hoverBody) select('body', hoverBody, false);
 });
-for (const id of ['tGrid', 'tBodies', 'tLabels', 'tSmooth'])
+for (const id of ['tGrid', 'tBodies', 'tLabels', 'tSmooth', 'tDim'])
   document.getElementById(id).addEventListener('change', draw);
+document.getElementById('clearHl').addEventListener('click', () => setHighlight(null));
+window.addEventListener('keydown', e => { if (e.key === 'Escape') setHighlight(null); });
 
 function focusOn(wx, wy, scale) {
   if (scale) view.scale = scale;
@@ -279,7 +362,9 @@ function select(kind, item, move = true) {
     d.innerHTML = '<b>' + item.name + '</b>' +
       row('cells', item.cells.toLocaleString()) +
       row('color', item.color) +
-      (item.known ? '' : '<div class="warn">not found in materials.xml</div>');
+      row('id', item.id) +
+      (item.known ? '' : '<div class="warn">not found in materials.xml</div>') +
+      '<div style="margin-top:4px">click again to clear highlight</div>';
   }
   draw();
 }
@@ -336,7 +421,11 @@ function renderList() {
       sw.className = 'sw'; sw.style.background = m.color;
       r.prepend(sw);
       if (!m.known) r.classList.add('warn');
-      r.onclick = () => { select('material', m); markSel(r); };
+      r.onclick = () => {
+        select('material', m);
+        markSel(r);
+        setHighlight(hlMaterial === m ? null : m);
+      };
       el.appendChild(r);
     }
   }
@@ -354,8 +443,16 @@ function markSel(r) {
   r.classList.add('sel');
 }
 
-img.onload = () => { resize(); fit(); draw(); };
+let pending = 2;
+const ready = () => {
+  if (--pending) return;
+  decodeMap();
+  resize(); fit(); draw();
+};
+img.onload = ready;
+mapImg.onload = ready;
 img.src = IMG;
+mapImg.src = MAP;
 renderList();
 </script>
 </body>
