@@ -1047,16 +1047,60 @@ func (m model) viewPlayer() string {
 			sections = append(sections, renderSection("Wallet", rows))
 		}
 
-		// Active status effects.
+		// Active status effects, grouped by name so duplicate instances
+		// collapse into a single row with an "×N" count.
 		if len(m.state.PlayerEffects) > 0 {
-			rows := make([]string, 0, len(m.state.PlayerEffects))
+			type effectGroup struct {
+				name  string
+				count int
+				// longest remaining duration in the group; a permanent
+				// effect (Frames < 0) always wins.
+				frames    int32
+				permanent bool
+			}
+			var order []string
+			groups := make(map[string]*effectGroup)
 			for _, e := range m.state.PlayerEffects {
 				name := effectLabel(e)
-				dur := effectDuration(e.Frames)
-				rows = append(rows, row(name, dur))
+				g := groups[name]
+				if g == nil {
+					g = &effectGroup{name: name, frames: e.Frames}
+					groups[name] = g
+					order = append(order, name)
+				}
+				g.count++
+				if e.Frames < 0 {
+					g.permanent = true
+				} else if e.Frames > g.frames {
+					g.frames = e.Frames
+				}
+			}
+			labels := make([]string, len(order))
+			durs := make([]string, len(order))
+			labelW := labelStyle.GetWidth()
+			for i, name := range order {
+				g := groups[name]
+				label := g.name
+				if g.count > 1 {
+					label = fmt.Sprintf("%s ×%d", g.name, g.count)
+				}
+				frames := g.frames
+				if g.permanent {
+					frames = -1
+				}
+				labels[i] = label
+				durs[i] = effectDuration(frames)
+				// +1 so the widest label keeps a space before its value.
+				if w := lipgloss.Width(label) + 1; w > labelW {
+					labelW = w
+				}
+			}
+			rows := make([]string, len(order))
+			for i := range order {
+				rows[i] = rowWidth(labels[i], durs[i], labelW)
 			}
 			sections = append(sections, renderSection(
-				fmt.Sprintf("Status Effects (%d)", len(m.state.PlayerEffects)), rows))
+				fmt.Sprintf("Status Effects (%d)", len(order)), rows))
 		}
 
 		// Entity summary counts
@@ -1097,10 +1141,14 @@ func (m model) viewPlayer() string {
 }
 
 // effectLabel picks the most descriptive name available for a status effect:
-// the CUSTOM id (perks), the carrier entity name, or a generic enum index.
+// the CUSTOM id (perks), the GAME_EFFECT enum name, the carrier entity name,
+// or a generic enum index as a last resort.
 func effectLabel(e noita.ActiveEffect) string {
 	if e.CustomEffectID != "" {
 		return e.CustomEffectID
+	}
+	if name := e.EffectName(); name != "" && name != "CUSTOM" {
+		return name
 	}
 	if e.Name != "" {
 		return e.Name
@@ -1605,6 +1653,12 @@ func truncateAnsi(s string, maxWidth int) string {
 
 func row(label, value string) string {
 	return labelStyle.Render(label) + valueStyle.Render(value)
+}
+
+// rowWidth renders a row with an explicit label-column width, for sections
+// whose labels can exceed the default labelStyle width and would otherwise wrap.
+func rowWidth(label, value string, width int) string {
+	return labelStyle.Width(width).Render(label) + valueStyle.Render(value)
 }
 
 func renderSection(title string, rows []string) string {
