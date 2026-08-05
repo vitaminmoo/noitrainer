@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Material is one entry from materials.xml with inheritance already resolved.
@@ -38,7 +39,11 @@ type Material struct {
 type Palette struct {
 	fsys      fs.FS
 	materials map[string]*Material
-	textures  map[string]*image.RGBA // texture_file -> decoded, nil if unusable
+
+	// texture loads lazily from concurrent renderers, so the cache needs
+	// a lock; materials is read-only after LoadPalette.
+	texMu    sync.Mutex
+	textures map[string]*image.RGBA // texture_file -> decoded, nil if unusable
 }
 
 type xmlGraphics struct {
@@ -144,6 +149,8 @@ func (p *Palette) texture(path string) *image.RGBA {
 	if path == "" {
 		return nil
 	}
+	p.texMu.Lock()
+	defer p.texMu.Unlock()
 	if img, seen := p.textures[path]; seen {
 		return img
 	}

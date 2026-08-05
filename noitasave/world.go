@@ -139,7 +139,7 @@ func (w *World) Render(p *Palette, opts RenderOptions) *image.RGBA {
 	if opts.DrawPhysics {
 		for _, coord := range coords {
 			for i := range w.Chunks[coord].PhysicsObjects {
-				drawPhysicsObject(img, &w.Chunks[coord].PhysicsObjects[i])
+				DrawPhysicsObject(img, &w.Chunks[coord].PhysicsObjects[i])
 			}
 		}
 	}
@@ -189,10 +189,10 @@ func (w *World) drawChunkCells(img *image.RGBA, coord ChunkCoord, c *Chunk, p *P
 	}
 }
 
-// drawPhysicsObject stamps a body's pixel image at its saved pose, rotating
+// DrawPhysicsObject stamps a body's pixel image at its saved pose, rotating
 // about the image centre. Destination pixels are inverse-mapped so the result
 // has no gaps.
-func drawPhysicsObject(img *image.RGBA, o *PhysicsObject) {
+func DrawPhysicsObject(img *image.RGBA, o *PhysicsObject) {
 	iw, ih := int(o.Width), int(o.Height)
 	if iw <= 0 || ih <= 0 || len(o.Colors) < iw*ih {
 		return

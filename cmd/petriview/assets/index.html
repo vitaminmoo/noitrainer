@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noita save explorer</title>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<style>
+  :root {
+    --bg: #0e0f13; --panel: #16181f; --line: #262a35;
+    --text: #e6e8ee; --dim: #9aa1b1; --accent: #7cc7ff; --warn: #ffcc66;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text); display: flex; height: 100vh;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  #side {
+    width: 340px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--line); display: flex; flex-direction: column;
+  }
+  #side h1 { font-size: 13px; margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  #side h1 small { color: var(--dim); font-weight: normal; display: block; margin-top: 2px; }
+  #tabs { display: flex; border-bottom: 1px solid var(--line); }
+  #tabs button {
+    flex: 1; background: none; border: 0; border-bottom: 2px solid transparent;
+    color: var(--dim); padding: 8px 4px; cursor: pointer; font: inherit;
+  }
+  #tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+  #list { overflow-y: auto; flex: 1; }
+  .row {
+    padding: 6px 14px; border-bottom: 1px solid var(--line);
+    cursor: pointer; display: flex; gap: 8px; align-items: baseline;
+  }
+  .row:hover { background: #1d2029; }
+  .row.sel { background: #23304a; }
+  .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .n { color: var(--dim); font-size: 11px; }
+  .kids { display: none; }
+  .kids.open { display: block; }
+  .kid { padding-left: 30px; font-size: 12px; color: var(--dim); }
+  .kid:hover { color: var(--text); }
+  .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; border: 1px solid #0006; }
+  #main { flex: 1; position: relative; overflow: hidden; }
+  #map { position: absolute; inset: 0; }
+  .leaflet-container { background: #07080b; cursor: grab; }
+  .leaflet-container:active { cursor: grabbing; }
+  #map:not(.smooth) .leaflet-tile { image-rendering: pixelated; }
+  /* Tiles that are requested but not yet delivered (queued or rendering
+     server-side) show as an animated hatch until the image arrives. */
+  @keyframes tilewait { to { background-position: 22.63px 0; } }
+  img.leaflet-tile:not(.leaflet-tile-loaded) {
+    background: repeating-linear-gradient(45deg, #7cc7ff1c 0 8px, #7cc7ff08 8px 16px);
+    outline: 1px dashed #7cc7ff2e; outline-offset: -1px;
+    animation: tilewait 0.8s linear infinite;
+  }
+  #hud, #detail {
+    position: absolute; background: #0e0f13e8; border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; pointer-events: none; z-index: 900;
+  }
+  #hud { top: 10px; left: 56px; color: var(--dim); }
+  #hud b { color: var(--text); font-weight: normal; }
+  #stats {
+    position: absolute; right: 10px; bottom: 10px; z-index: 900;
+    background: #0e0f13e8; border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 10px; color: var(--dim); pointer-events: none; font-size: 12px;
+  }
+  #stats b { color: var(--text); font-weight: normal; }
+  #stats .busy { color: var(--accent); }
+  #detail { right: 10px; top: 10px; max-width: 300px; display: none; }
+  #detail div { color: var(--dim); }
+  #detail div span { color: var(--text); }
+  #toolbar {
+    position: absolute; bottom: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap;
+    z-index: 900;
+  }
+  #toolbar label {
+    background: #0e0f13e8; border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 8px; cursor: pointer; user-select: none;
+  }
+  #toolbar input { vertical-align: -1px; margin-right: 4px; }
+  .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<div id="side">
+  <h1>Noita save explorer<small id="sub">loading index…</small></h1>
+  <div id="tabs">
+    <button data-tab="chunks" class="on">Chunks</button>
+    <button data-tab="bodies">Bodies</button>
+    <button data-tab="materials">Materials</button>
+  </div>
+  <div id="list"></div>
+</div>
+<div id="main">
+  <div id="map"></div>
+  <div id="hud"></div>
+  <div id="detail"></div>
+  <div id="stats"></div>
+  <div id="toolbar">
+    <label><input type="checkbox" id="tGrid" checked>chunk grid</label>
+    <label><input type="checkbox" id="tBodies" checked>body markers</label>
+    <label><input type="checkbox" id="tLabels">labels</label>
+    <label><input type="checkbox" id="tPhys" checked>physics pixels</label>
+    <label><input type="checkbox" id="tSmooth">smooth</label>
+    <label><input type="checkbox" id="tDim">dim others</label>
+    <label id="clearHl" style="display:none">clear highlight ✕</label>
+  </div>
+</div>
+<script src="/vendor/leaflet.js"></script>
+<script>
+'use strict';
+// Must match nativeZoom in the Go server: at this Leaflet zoom, one tile
+// pixel is one world pixel. Higher zooms upscale client-side.
+const NATIVE = 10, MAXZOOM = 13;
+
+let WORLD = null, map = null, tiles = null;
+let bodies = [], chunkSet = new Set(), matByName = new Map();
+let hlMaterial = null, sel = null, hoverBody = null, hoverRing = null;
+
+const $ = id => document.getElementById(id);
+const w2ll = (x, y) => map.unproject([x, y], NATIVE);
+const ll2w = ll => map.project(ll, NATIVE);
+const viewScale = () => Math.pow(2, map.getZoom() - NATIVE);
+
+function tileURL() {
+  const q = new URLSearchParams();
+  if (hlMaterial) q.set('hl', hlMaterial.name);
+  if (hlMaterial && $('tDim').checked) q.set('dim', '1');
+  if (!$('tPhys').checked) q.set('phys', '0');
+  const s = q.toString();
+  return '/tile/{z}/{x}/{y}.png' + (s ? '?' + s : '');
+}
+
+fetch('/index.json').then(r => r.json()).then(init);
+
+function init(w) {
+  WORLD = w;
+  for (const m of WORLD.materials) matByName.set(m.name, m);
+  for (const c of WORLD.chunks) {
+    chunkSet.add(c.x + ',' + c.y);
+    for (const o of (c.objects || [])) bodies.push({...o, chunk: c});
+  }
+
+  $('sub').textContent =
+    WORLD.totals.chunks + ' chunks · ' + WORLD.totals.objects + ' bodies · ' +
+    WORLD.totals.joints + ' joints · ' + WORLD.totals.solidCells.toLocaleString() + ' solid cells';
+
+  map = L.map('map', {
+    crs: L.CRS.Simple, minZoom: 0, maxZoom: MAXZOOM,
+    attributionControl: false, zoomSnap: 1,
+  });
+
+  const B = WORLD.bounds;
+  const worldBounds = L.latLngBounds(w2ll(B.x, B.y), w2ll(B.x + B.w, B.y + B.h));
+
+  tiles = L.tileLayer(tileURL(), {
+    tileSize: 256, minNativeZoom: 0, maxNativeZoom: NATIVE, maxZoom: MAXZOOM,
+    noWrap: true, bounds: worldBounds, keepBuffer: 2,
+    // Only fetch once panning/zooming settles; Leaflet aborts loads for
+    // tiles that leave the view, and the server stops rendering those.
+    updateWhenIdle: true, updateWhenZooming: false,
+  }).addTo(map);
+
+  overlay.addTo(map);
+
+  // #x,y,zoom deep link; otherwise start at the main world's spawn area so
+  // the first paint only needs a handful of tiles. Everything else (parallel
+  // worlds, the deep depths) is reachable by zooming out.
+  const hash = location.hash.match(/^#(-?\d+),(-?\d+),(\d+)$/);
+  if (hash) {
+    map.setView(w2ll(+hash[1], +hash[2]), +hash[3]);
+  } else {
+    map.setView(w2ll(230, -60), 8);
+  }
+
+  map.on('mousemove', onMouseMove);
+  map.on('click', () => { if (hoverBody) select('body', hoverBody, false); });
+  map.on('zoomend', updateHudZoom);
+  map.on('moveend', () => {
+    const c = ll2w(map.getCenter());
+    history.replaceState(null, '', '#' + Math.round(c.x) + ',' + Math.round(c.y) + ',' + map.getZoom());
+  });
+
+  // Tile-loading bookkeeping for the status badge. The 'load' event (all
+  // visible tiles settled) resets the counter, which also corrects any
+  // drift from aborted requests.
+  tiles.on('tileloadstart', () => { tilesInflight++; renderStats(); });
+  tiles.on('tileload', () => { tilesInflight = Math.max(0, tilesInflight - 1); renderStats(); });
+  tiles.on('tileerror', () => { tilesInflight = Math.max(0, tilesInflight - 1); renderStats(); });
+  tiles.on('load', () => { tilesInflight = 0; renderStats(); });
+  pollStats();
+  setInterval(pollStats, 1000);
+
+  for (const id of ['tGrid', 'tBodies', 'tLabels'])
+    $(id).addEventListener('change', () => overlay.redraw());
+  $('tSmooth').addEventListener('change',
+    () => $('map').classList.toggle('smooth', $('tSmooth').checked));
+  $('tPhys').addEventListener('change', () => tiles.setUrl(tileURL()));
+  $('tDim').addEventListener('change', () => tiles.setUrl(tileURL()));
+  $('clearHl').addEventListener('click', () => setHighlight(null));
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') setHighlight(null); });
+
+  renderList();
+}
+
+// ---- chunk grid / body marker overlay (canvas per tile) -------------------
+const overlay = new (L.GridLayer.extend({
+  createTile(coords) {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 256;
+    const g = cv.getContext('2d');
+    const scale = Math.pow(2, coords.z - NATIVE); // screen px per world px
+    const wx0 = coords.x * 256 / scale, wy0 = coords.y * 256 / scale;
+    const wx1 = wx0 + 256 / scale, wy1 = wy0 + 256 / scale;
+    const cs = WORLD.chunkSize;
+
+    if ($('tGrid').checked && cs * scale >= 8) {
+      g.lineWidth = 1;
+      g.strokeStyle = '#ffffff22';
+      g.fillStyle = '#ffffff66';
+      g.font = '11px ui-monospace, monospace';
+      for (let cy = Math.floor(wy0 / cs) * cs; cy < wy1; cy += cs) {
+        for (let cx = Math.floor(wx0 / cs) * cs; cx < wx1; cx += cs) {
+          if (!chunkSet.has(cx + ',' + cy)) continue;
+          const x = (cx - wx0) * scale, y = (cy - wy0) * scale, s = cs * scale;
+          g.strokeRect(x + 0.5, y + 0.5, s, s);
+          if ($('tLabels').checked && s > 90) g.fillText(cx + ',' + cy, x + 4, y + 12);
+        }
+      }
+    }
+
+    if ($('tBodies').checked) {
+      // Bodies just outside the tile can still have their marker ring in it.
+      const pad = 32 / scale;
+      for (const b of bodies) {
+        if (b.x < wx0 - pad || b.x > wx1 + pad || b.y < wy0 - pad || b.y > wy1 + pad) continue;
+        const x = (b.x - wx0) * scale, y = (b.y - wy0) * scale;
+        const r = Math.max(3, Math.min(b.w, b.h) * scale / 2);
+        g.beginPath();
+        g.arc(x, y, r, 0, Math.PI * 2);
+        g.strokeStyle = b.isStatic ? '#ffcc6699' : '#ff7c7c99';
+        g.lineWidth = 1;
+        g.stroke();
+      }
+    }
+    return cv;
+  },
+}))({tileSize: 256, updateWhenZooming: false});
+
+// ---- HUD ------------------------------------------------------------------
+let lastMat = null, matTimer = null, matSeq = 0;
+
+function onMouseMove(e) {
+  const p = ll2w(e.latlng);
+  const wx = Math.floor(p.x), wy = Math.floor(p.y);
+  const cs = WORLD.chunkSize;
+  const cx = Math.floor(wx / cs) * cs, cy = Math.floor(wy / cs) * cs;
+  updateHud(wx, wy, cx, cy);
+
+  // Debounced material lookup; only the newest response wins.
+  clearTimeout(matTimer);
+  matTimer = setTimeout(() => {
+    const seq = ++matSeq;
+    fetch('/material?x=' + wx + '&y=' + wy)
+      .then(r => r.json())
+      .then(m => { if (seq === matSeq) { lastMat = m; updateHud(wx, wy, cx, cy); } })
+      .catch(() => {});
+  }, 60);
+
+  // Nearest body within a few screen pixels.
+  let best = null, bestD = 14 / viewScale();
+  for (const b of bodies) {
+    const d = Math.hypot(b.x - p.x, b.y - p.y);
+    if (d < bestD) { bestD = d; best = b; }
+  }
+  if (best !== hoverBody) {
+    hoverBody = best;
+    if (hoverRing) { hoverRing.remove(); hoverRing = null; }
+    if (best) {
+      hoverRing = L.circleMarker(w2ll(best.x, best.y), {
+        radius: 10, color: '#7cc7ff', weight: 2, fill: false, interactive: false,
+      }).addTo(map);
+    }
+  }
+}
+
+function updateHud(wx, wy, cx, cy) {
+  let matLine = 'material <b>-</b>';
+  if (lastMat && lastMat.material) {
+    const m = matByName.get(lastMat.material);
+    matLine = 'material <b>' + lastMat.material + '</b>' +
+      (lastMat.custom ? ' <i>(custom colour)</i>' : '') +
+      (m ? ' <span class="sw" style="display:inline-block;background:' + m.color + '"></span>' : '');
+  }
+  $('hud').innerHTML =
+    matLine + '<br>world <b>' + wx + ', ' + wy + '</b><br>' +
+    'chunk <b>' + cx + ', ' + cy + '</b><br>zoom <b>' + viewScale().toFixed(2) + '×</b>';
+}
+
+function updateHudZoom() {
+  const z = $('hud').innerHTML.replace(/zoom <b>[^<]*<\/b>/, 'zoom <b>' + viewScale().toFixed(2) + '×</b>');
+  $('hud').innerHTML = z;
+}
+
+// ---- status badge ---------------------------------------------------------
+let tilesInflight = 0, serverStats = null;
+
+function pollStats() {
+  fetch('/stats').then(r => r.json())
+    .then(s => { serverStats = s; renderStats(); })
+    .catch(() => {});
+}
+
+function renderStats() {
+  const s = serverStats;
+  const busy = tilesInflight > 0 || (s && (s.tilesRendering > 0 || s.tilesQueued > 0));
+  let line1 = busy
+    ? '<span class="busy">● </span>tiles <b>' + tilesInflight + '</b> loading' +
+      (s ? ' · <b>' + s.tilesRendering + '</b> rendering, <b>' + s.tilesQueued + '</b> queued' : '')
+    : '<span style="color:#5fb95f">● </span>idle';
+  let line2 = s
+    ? 'chunks <b>' + s.chunksCached + '</b>/' + s.chunkCacheCap + ' cached of <b>' +
+      s.chunksTotal + '</b> · <b>' + s.chunkLoads + '</b> loads · tiles <b>' +
+      s.tilesCached + '</b> cached'
+    : '';
+  $('stats').innerHTML = line1 + (line2 ? '<br>' + line2 : '');
+}
+
+// ---- highlight ------------------------------------------------------------
+function setHighlight(m) {
+  hlMaterial = m;
+  $('clearHl').style.display = m ? '' : 'none';
+  tiles.setUrl(tileURL());
+}
+
+// ---- selection / detail panel ---------------------------------------------
+function focusOn(wx, wy, minScale) {
+  let z = map.getZoom();
+  if (minScale) z = Math.max(z, NATIVE + Math.round(Math.log2(minScale)));
+  map.setView(w2ll(wx, wy), z);
+}
+
+function select(kind, item, move = true) {
+  sel = {kind, item};
+  const d = $('detail');
+  d.style.display = 'block';
+  if (kind === 'chunk') {
+    d.innerHTML = '<b>' + item.file + '</b>' +
+      row('origin', item.x + ', ' + item.y) +
+      row('version', item.version) +
+      row('solid cells', item.solidCells.toLocaleString()) +
+      row('materials', item.materials.length) +
+      row('custom colors', item.customColors.toLocaleString()) +
+      row('bodies', (item.objects || []).length) +
+      row('joints', (item.joints || []).length);
+    if (move) focusOn(item.x + WORLD.chunkSize / 2, item.y + WORLD.chunkSize / 2, 0.35);
+  } else if (kind === 'body') {
+    const js = (item.chunk.joints || []).filter(j => j.bodyA === item.id || j.bodyB === item.id);
+    d.innerHTML = '<b>body ' + item.id + '</b>' +
+      row('material', item.material) +
+      row('position', item.x.toFixed(1) + ', ' + item.y.toFixed(1)) +
+      row('rotation', (item.rot * 180 / Math.PI).toFixed(1) + '°') +
+      row('image', item.w + '×' + item.h) +
+      row('shape', item.isCircle ? 'circle r=' + item.radius.toFixed(2) : 'pixel body') +
+      row('static', item.isStatic) +
+      row('z', item.z) +
+      row('joints', js.length ? js.map(j => j.kind).join(', ') : 'none') +
+      row('chunk', item.chunk.file);
+    if (move) focusOn(item.x, item.y, 2);
+  } else if (kind === 'material') {
+    d.innerHTML = '<b>' + item.name + '</b>' +
+      row('cells', item.cells.toLocaleString()) +
+      row('color', item.color) +
+      (item.known ? '' : '<div class="warn">not found in materials.xml</div>') +
+      '<div style="margin-top:4px">click again to clear highlight</div>';
+  }
+}
+const row = (k, v) => '<div>' + k + ' <span>' + v + '</span></div>';
+
+// ---- sidebar --------------------------------------------------------------
+let tab = 'chunks';
+for (const b of document.querySelectorAll('#tabs button')) {
+  b.addEventListener('click', () => {
+    tab = b.dataset.tab;
+    for (const o of document.querySelectorAll('#tabs button')) o.classList.toggle('on', o === b);
+    renderList();
+  });
+}
+
+function renderList() {
+  const el = $('list');
+  el.innerHTML = '';
+  if (tab === 'chunks') {
+    for (const c of WORLD.chunks) {
+      const r = mkRow(c.file, (c.objects || []).length + 'b/' + (c.joints || []).length + 'j');
+      const kids = document.createElement('div');
+      kids.className = 'kids';
+      for (const o of (c.objects || [])) {
+        const k = mkRow('body ' + o.id.slice(-6) + ' · ' + (o.material || '?'), o.w + '×' + o.h);
+        k.classList.add('kid');
+        k.onclick = ev => {
+          ev.stopPropagation();
+          select('body', bodies.find(b => b.id === o.id && b.chunk === c));
+        };
+        kids.appendChild(k);
+      }
+      for (const j of (c.joints || [])) {
+        const k = mkRow('joint ' + j.kind, j.local ? '' : 'cross-chunk');
+        k.classList.add('kid');
+        if (!j.local) k.classList.add('warn');
+        kids.appendChild(k);
+      }
+      r.onclick = () => {
+        kids.classList.toggle('open');
+        select('chunk', c);
+        markSel(r);
+      };
+      el.appendChild(r); el.appendChild(kids);
+    }
+  } else if (tab === 'bodies') {
+    const sorted = [...bodies].sort((a, b) => b.pixels - a.pixels);
+    for (const o of sorted) {
+      const r = mkRow((o.material || '?') + ' · ' + o.id.slice(-6), o.w + '×' + o.h);
+      r.onclick = () => { select('body', o); markSel(r); };
+      el.appendChild(r);
+    }
+  } else {
+    for (const m of WORLD.materials) {
+      const r = mkRow(m.name, m.cells.toLocaleString());
+      const sw = document.createElement('span');
+      sw.className = 'sw'; sw.style.background = m.color;
+      r.prepend(sw);
+      if (!m.known) r.classList.add('warn');
+      r.onclick = () => {
+        select('material', m);
+        markSel(r);
+        setHighlight(hlMaterial === m ? null : m);
+      };
+      el.appendChild(r);
+    }
+  }
+}
+function mkRow(name, n) {
+  const r = document.createElement('div');
+  r.className = 'row';
+  r.innerHTML = '<span class="name"></span><span class="n"></span>';
+  r.querySelector('.name').textContent = name;
+  r.querySelector('.n').textContent = n;
+  return r;
+}
+function markSel(r) {
+  for (const o of document.querySelectorAll('.row.sel')) o.classList.remove('sel');
+  r.classList.add('sel');
+}
+</script>
+</body>
+</html>

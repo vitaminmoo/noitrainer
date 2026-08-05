@@ -1,25 +1,35 @@
-// Command petriview renders a Noita save's world chunks to a PNG and dumps a
-// JSON index of everything the chunk files contain.
+// Command petriview serves a Noita save's world chunks as a browsable map.
 //
-//	petriview -world ~/.../save00/world -out /tmp/save
+//	petriview -world ~/.../save00/world
 //
-// writes /tmp/save.png (the composited world) and /tmp/save.json (chunks,
-// materials, rigid bodies and joints). With -html it also writes a
-// self-contained explorer page that embeds both.
+// then open http://127.0.0.1:8940. Tiles are rendered on demand from the
+// .png_petri chunks (zoomed-out levels sample every Nth world pixel), so
+// memory stays bounded no matter how much of the world has been explored.
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
+	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"noitrainer/noitadata"
 	"noitrainer/noitasave"
 )
+
+//go:embed assets
+var assets embed.FS
 
 type jsonWorld struct {
 	Bounds    jsonRect     `json:"bounds"`
@@ -46,8 +56,6 @@ type jsonTotals struct {
 
 // jsonMatUse is a world-wide material tally, for the legend.
 type jsonMatUse struct {
-	// ID is this material's value in the material-map image; 0 = not mapped.
-	ID    int    `json:"id"`
 	Name  string `json:"name"`
 	Cells int    `json:"cells"`
 	Color string `json:"color"`
@@ -118,9 +126,7 @@ func jointKindName(k uint32) string {
 func main() {
 	world := flag.String("world", "", "path to a save00/world directory (required)")
 	install := flag.String("install", "", "Noita install directory (default: auto-detect)")
-	out := flag.String("out", "world", "output path prefix")
-	noPhysics := flag.Bool("no-physics", false, "omit rigid bodies from the render")
-	writeHTML := flag.Bool("html", false, "also write a self-contained explorer page")
+	addr := flag.String("addr", "127.0.0.1:8940", "HTTP listen address")
 	flag.Parse()
 
 	if *world == "" {
@@ -129,13 +135,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	w, problems, err := noitasave.LoadWorld(*world)
+	st, problems, err := openStore(*world, 768)
 	for _, p := range problems {
-		fmt.Fprintf(os.Stderr, "warning: %v\n", p)
+		log.Printf("warning: %v", p)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("petriview: %v", err)
 	}
 
 	var fsys *noitadata.FS
@@ -145,168 +150,245 @@ func main() {
 		fsys, err = noitadata.OpenAuto()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "petriview: opening Noita install: %v\n"+
-			"pass -install if auto-detection failed\n", err)
-		os.Exit(1)
+		log.Fatalf("petriview: opening Noita install: %v\npass -install if auto-detection failed", err)
 	}
 	defer fsys.Close()
 
 	palette, err := noitasave.LoadPalette(fsys)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("petriview: %v", err)
 	}
 
-	opts := noitasave.DefaultRenderOptions()
-	opts.DrawPhysics = !*noPhysics
-	img := w.Render(palette, opts)
-
-	pngPath := *out + ".png"
-	if err := noitasave.WritePNG(pngPath, img); err != nil {
-		fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
-		os.Exit(1)
+	start := time.Now()
+	log.Printf("indexing %d chunks...", len(st.coords))
+	idx, errs := buildIndex(st, palette)
+	for _, e := range errs {
+		log.Printf("warning: %v", e)
 	}
-
-	index := buildIndex(w, palette)
-
-	// The world-wide material list defines the id space used by the lookup
-	// map, so a viewer can turn a pixel back into a material name.
-	ids := make(map[string]int, len(index.Materials))
-	for i := range index.Materials {
-		index.Materials[i].ID = i + 1
-		ids[index.Materials[i].Name] = i + 1
-	}
-	mapPath := *out + ".map.png"
-	if err := noitasave.WritePNG(mapPath, w.RenderMaterialMap(ids)); err != nil {
-		fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
-		os.Exit(1)
-	}
-	jsonPath := *out + ".json"
-	blob, err := json.MarshalIndent(index, "", "  ")
+	indexJSON, err := json.Marshal(idx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("petriview: %v", err)
 	}
-	if err := os.WriteFile(jsonPath, blob, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
-		os.Exit(1)
+	log.Printf("indexed in %.1fs: %d chunks, %d bodies, %d joints, %d materials, %d solid cells",
+		time.Since(start).Seconds(), idx.Totals.Chunks, idx.Totals.Objects,
+		idx.Totals.Joints, len(idx.Materials), idx.Totals.SolidCells)
+
+	ts := newTileServer(st, palette, 1024)
+
+	sub, err := fs.Sub(assets, "assets")
+	if err != nil {
+		log.Fatalf("petriview: %v", err)
 	}
 
-	b := img.Bounds()
-	fmt.Printf("%s  %dx%d px, world (%d,%d)-(%d,%d)\n",
-		pngPath, b.Dx(), b.Dy(), b.Min.X, b.Min.Y, b.Max.X, b.Max.Y)
-	fmt.Printf("%s  material lookup map\n", mapPath)
-	fmt.Printf("%s  %d chunks, %d bodies, %d joints, %d materials, %d solid cells\n",
-		jsonPath, index.Totals.Chunks, index.Totals.Objects, index.Totals.Joints,
-		len(index.Materials), index.Totals.SolidCells)
+	mux := http.NewServeMux()
+	mux.Handle("GET /vendor/", http.FileServerFS(sub))
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, sub, "index.html")
+	})
+	mux.HandleFunc("GET /index.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(indexJSON)
+	})
+	mux.HandleFunc("GET /tile/{z}/{x}/{y}", ts.handleTile)
+	mux.HandleFunc("GET /material", handleMaterial(st))
+	mux.HandleFunc("GET /stats", func(w http.ResponseWriter, r *http.Request) {
+		ts.mu.Lock()
+		tileCount := ts.lru.Len()
+		ts.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]int64{
+			"tilesQueued":    ts.queued.Load(),
+			"tilesRendering": ts.rendering.Load(),
+			"tilesRendered":  ts.rendered.Load(),
+			"tileCacheHits":  ts.hits.Load(),
+			"tilesCached":    int64(tileCount),
+			"chunksCached":   int64(st.cached()),
+			"chunkCacheCap":  int64(st.cap),
+			"chunkLoads":     st.loads.Load(),
+			"chunksTotal":    int64(len(st.coords)),
+		})
+	})
 
-	if *writeHTML {
-		htmlPath := *out + ".html"
-		if err := writeExplorer(htmlPath, pngPath, mapPath, index); err != nil {
-			fmt.Fprintf(os.Stderr, "petriview: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("%s  self-contained explorer\n", htmlPath)
+	log.Printf("serving %s on http://%s", *world, *addr)
+	if err := http.ListenAndServe(*addr, mux); err != nil {
+		log.Fatalf("petriview: %v", err)
 	}
 }
 
-func buildIndex(w *noitasave.World, p *noitasave.Palette) jsonWorld {
-	b := w.Bounds()
+func (t *tileServer) handleTile(w http.ResponseWriter, r *http.Request) {
+	z, err1 := strconv.Atoi(r.PathValue("z"))
+	tx, err2 := strconv.Atoi(r.PathValue("x"))
+	ty, err3 := strconv.Atoi(strings.TrimSuffix(r.PathValue("y"), ".png"))
+	if err1 != nil || err2 != nil || err3 != nil || z < 0 || z > nativeZoom {
+		http.Error(w, "bad tile address", http.StatusBadRequest)
+		return
+	}
+	q := r.URL.Query()
+	b, err := t.tile(r.Context(), z, tx, ty, q.Get("hl"), q.Get("dim") == "1", q.Get("phys") != "0")
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // client gave up; nothing to answer
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(b)
+}
+
+func handleMaterial(st *store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		wx, err1 := strconv.Atoi(q.Get("x"))
+		wy, err2 := strconv.Atoi(q.Get("y"))
+		if err1 != nil || err2 != nil {
+			http.Error(w, "bad coordinate", http.StatusBadRequest)
+			return
+		}
+		var resp struct {
+			Material string `json:"material,omitempty"`
+			Custom   bool   `json:"custom,omitempty"`
+			Chunk    string `json:"chunk,omitempty"`
+		}
+		coord := chunkOrigin(wx, wy)
+		if e, err := st.chunk(coord); e != nil && err == nil {
+			lx, ly := wx-coord.X, wy-coord.Y
+			if lx < int(e.c.Width) && ly < int(e.c.Height) {
+				i := ly*int(e.c.Width) + lx
+				if cell := e.c.Cells[i]; cell != 0 {
+					if mi, _ := noitasave.CellMaterial(cell); int(mi) < len(e.c.MaterialNames) {
+						resp.Material = e.c.MaterialNames[mi]
+					}
+					resp.Custom = e.colorIdx[i] >= 0
+					resp.Chunk = filepath.Base(st.paths[coord])
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// buildIndex summarises every chunk without retaining any of them: chunks are
+// loaded, tallied, and dropped, a bounded number at a time.
+func buildIndex(st *store, p *noitasave.Palette) (jsonWorld, []error) {
 	idx := jsonWorld{
-		Bounds:    jsonRect{X: b.Min.X, Y: b.Min.Y, W: b.Dx(), H: b.Dy()},
+		Bounds: jsonRect{
+			X: st.bounds.Min.X, Y: st.bounds.Min.Y,
+			W: st.bounds.Dx(), H: st.bounds.Dy(),
+		},
 		ChunkSize: noitasave.ChunkSize,
 	}
 
-	worldMats := map[string]int{}
-
-	coords := make([]noitasave.ChunkCoord, 0, len(w.Chunks))
-	for c := range w.Chunks {
-		coords = append(coords, c)
+	type result struct {
+		jc     jsonChunk
+		counts map[string]int
+		err    error
 	}
-	sort.Slice(coords, func(i, j int) bool {
-		if coords[i].Y != coords[j].Y {
-			return coords[i].Y < coords[j].Y
-		}
-		return coords[i].X < coords[j].X
-	})
-
-	for _, coord := range coords {
-		c := w.Chunks[coord]
-		jc := jsonChunk{
-			File:    filepath.Base(w.Paths[coord]),
-			X:       coord.X,
-			Y:       coord.Y,
-			Version: c.Version,
-			W:       c.Width,
-			H:       c.Height,
-			Colors:  len(c.CustomColors),
-			// Always emit arrays, never null: the explorer iterates these
-			// directly and a null would abort its script.
-			Objects: []jsonObject{},
-			Joints:  []jsonJoint{},
-		}
-
-		counts := map[string]int{}
-		for _, cell := range c.Cells {
-			if cell == 0 {
-				continue
+	results := make([]result, len(st.coords))
+	sem := make(chan struct{}, runtime.NumCPU())
+	var wg sync.WaitGroup
+	for i, coord := range st.coords {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			path := st.paths[coord]
+			c, err := noitasave.LoadChunk(path)
+			if err != nil {
+				results[i] = result{err: err}
+				return
 			}
-			mi, _ := noitasave.CellMaterial(cell)
-			if int(mi) >= len(c.MaterialNames) {
-				continue
-			}
-			counts[c.MaterialNames[mi]]++
-			jc.SolidCells++
+			jc, counts := indexChunk(coord, path, c, p)
+			results[i] = result{jc: jc, counts: counts}
+		}()
+	}
+	wg.Wait()
+
+	var errs []error
+	worldMats := map[string]int{}
+	for _, r := range results {
+		if r.err != nil {
+			errs = append(errs, r.err)
+			continue
 		}
-		jc.Materials = tally(counts, p)
-		for name, n := range counts {
+		for name, n := range r.counts {
 			worldMats[name] += n
 		}
-
-		bodies := map[uint64]bool{}
-		for _, o := range c.PhysicsObjects {
-			bodies[o.ID] = true
-		}
-
-		for _, o := range c.PhysicsObjects {
-			mat := ""
-			if int(o.MaterialIndex) < len(c.MaterialNames) {
-				mat = c.MaterialNames[o.MaterialIndex]
-			}
-			jc.Objects = append(jc.Objects, jsonObject{
-				ID:       strconv.FormatUint(o.ID, 10),
-				Material: mat,
-				X:        o.X, Y: o.Y, Rot: o.Rot,
-				W: o.Width, H: o.Height, Pixels: len(o.Colors),
-				IsStatic: o.IsStatic,
-				IsCircle: o.CircleRadius > 0,
-				Radius:   o.CircleRadius,
-				Z:        o.Z,
-			})
-		}
-		for _, j := range c.Joints {
-			jc.Joints = append(jc.Joints, jsonJoint{
-				ID:    strconv.FormatUint(j.ID, 10),
-				Kind:  jointKindName(j.Kind),
-				BodyA: strconv.FormatUint(j.BodyAID, 10),
-				BodyB: strconv.FormatUint(j.BodyBID, 10),
-				Local: bodies[j.BodyAID] && bodies[j.BodyBID],
-			})
-		}
-
 		idx.Totals.Chunks++
-		idx.Totals.Objects += len(jc.Objects)
-		idx.Totals.Joints += len(jc.Joints)
-		idx.Totals.CustomColors += jc.Colors
-		idx.Totals.SolidCells += jc.SolidCells
-		idx.Chunks = append(idx.Chunks, jc)
+		idx.Totals.Objects += len(r.jc.Objects)
+		idx.Totals.Joints += len(r.jc.Joints)
+		idx.Totals.CustomColors += r.jc.Colors
+		idx.Totals.SolidCells += r.jc.SolidCells
+		idx.Chunks = append(idx.Chunks, r.jc)
 	}
-
 	idx.Materials = tally(worldMats, p)
-	return idx
+	return idx, errs
 }
 
-// tally turns a name->cell-count map into a sorted, colour-annotated slice.
+func indexChunk(coord noitasave.ChunkCoord, path string, c *noitasave.Chunk, p *noitasave.Palette) (jsonChunk, map[string]int) {
+	jc := jsonChunk{
+		File:    filepath.Base(path),
+		X:       coord.X,
+		Y:       coord.Y,
+		Version: c.Version,
+		W:       c.Width,
+		H:       c.Height,
+		Colors:  len(c.CustomColors),
+		// Always emit arrays, never null: the explorer iterates these
+		// directly and a null would abort its script.
+		Objects: []jsonObject{},
+		Joints:  []jsonJoint{},
+	}
+
+	counts := map[string]int{}
+	for _, cell := range c.Cells {
+		if cell == 0 {
+			continue
+		}
+		mi, _ := noitasave.CellMaterial(cell)
+		if int(mi) >= len(c.MaterialNames) {
+			continue
+		}
+		counts[c.MaterialNames[mi]]++
+		jc.SolidCells++
+	}
+	jc.Materials = tally(counts, p)
+
+	bodies := map[uint64]bool{}
+	for _, o := range c.PhysicsObjects {
+		bodies[o.ID] = true
+	}
+	for _, o := range c.PhysicsObjects {
+		mat := ""
+		if int(o.MaterialIndex) < len(c.MaterialNames) {
+			mat = c.MaterialNames[o.MaterialIndex]
+		}
+		jc.Objects = append(jc.Objects, jsonObject{
+			ID:       strconv.FormatUint(o.ID, 10),
+			Material: mat,
+			X:        o.X, Y: o.Y, Rot: o.Rot,
+			W: o.Width, H: o.Height, Pixels: len(o.Colors),
+			IsStatic: o.IsStatic,
+			IsCircle: o.CircleRadius > 0,
+			Radius:   o.CircleRadius,
+			Z:        o.Z,
+		})
+	}
+	for _, j := range c.Joints {
+		jc.Joints = append(jc.Joints, jsonJoint{
+			ID:    strconv.FormatUint(j.ID, 10),
+			Kind:  jointKindName(j.Kind),
+			BodyA: strconv.FormatUint(j.BodyAID, 10),
+			BodyB: strconv.FormatUint(j.BodyBID, 10),
+			Local: bodies[j.BodyAID] && bodies[j.BodyBID],
+		})
+	}
+	return jc, counts
+}
+
 func tally(counts map[string]int, p *noitasave.Palette) []jsonMatUse {
 	out := make([]jsonMatUse, 0, len(counts))
 	for name, n := range counts {
