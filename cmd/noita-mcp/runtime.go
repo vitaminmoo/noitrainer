@@ -95,6 +95,18 @@ type dumpInput struct {
 	Size     int   `json:"size,omitempty" jsonschema:"bytes to dump (default 256)"`
 }
 
+type wandDeckInput struct {
+	EntityID int32 `json:"entity_id,omitempty" jsonschema:"EntityId of a wand entity; omit and set held=true to use the player's active wand"`
+	Held     bool  `json:"held,omitempty" jsonschema:"when true and entity_id is omitted, resolve the player's currently-held wand"`
+}
+
+type entitiesInput struct {
+	Name      string `json:"name,omitempty" jsonschema:"case-insensitive substring match on entity name"`
+	Component string `json:"component,omitempty" jsonschema:"keep only entities that have a component whose type name contains this (case-insensitive)"`
+	Tag       string `json:"tag,omitempty" jsonschema:"keep only entities that have a tag whose name contains this (case-insensitive)"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"max rows to return (default 200)"`
+}
+
 // sortedKeys2RT mirrors cmd/cli/main.go:sortedKeys2.
 func sortedKeys2RT[V any](m map[string][]V) []string {
 	keys := make([]string, 0, len(m))
@@ -260,35 +272,100 @@ func registerRuntimeTools(s *mcp.Server) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "entities",
-		Description: "List all live entities with id, name, position, and component names.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, any, error) {
+		Description: "List live entities with id, name, position, and component names. Optional filters: name (substring), component (type name), tag (name); limit defaults to 200.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in entitiesInput) (*mcp.CallToolResult, any, error) {
 		reader, _, err := connectRuntime()
 		if err != nil {
 			return toolErr(err)
 		}
 		nameMap := buildRuntimeBufferNames(reader)
 		entities := reader.ReadEntityList()
+
+		limit := in.Limit
+		if limit <= 0 {
+			limit = 200
+		}
+		nameFilter := strings.ToLower(in.Name)
+		compFilter := strings.ToLower(in.Component)
+		tagFilter := strings.ToLower(in.Tag)
+
+		// Tag names are resolved lazily; only needed when filtering by tag.
+		var tagNames map[int]string
+		if tagFilter != "" {
+			tagNames = reader.ReadEntityTagNames()
+		}
+
+		compNamesFor := func(e *noita.EntitySummary) []string {
+			out := make([]string, 0, len(e.ComponentIDs))
+			for _, cid := range e.ComponentIDs {
+				if n, ok := nameMap[cid]; ok {
+					out = append(out, n)
+				} else {
+					out = append(out, fmt.Sprintf("type_%d", cid))
+				}
+			}
+			return out
+		}
+		hasTag := func(e *noita.EntitySummary) bool {
+			if tagNames == nil {
+				return false
+			}
+			for i, bt := range e.Entity.TagBitset {
+				for bit := 0; bit < 8; bit++ {
+					if bt&(1<<bit) == 0 {
+						continue
+					}
+					if n, ok := tagNames[i*8+bit]; ok && strings.Contains(strings.ToLower(n), tagFilter) {
+						return true
+					}
+				}
+			}
+			return false
+		}
+
 		var b strings.Builder
-		fmt.Fprintf(&b, "Found %d entities\n\n", len(entities))
 		fmt.Fprintf(&b, "%-8s %-30s %-20s %s\n", "ID", "Name", "Position", "Components")
 		fmt.Fprintf(&b, "%-8s %-30s %-20s %s\n", "──", "────", "────────", "──────────")
+		matched := 0
+		shown := 0
 		for _, e := range entities {
+			cNames := compNamesFor(e)
+			if nameFilter != "" && !strings.Contains(strings.ToLower(e.Name), nameFilter) {
+				continue
+			}
+			if compFilter != "" {
+				ok := false
+				for _, cn := range cNames {
+					if strings.Contains(strings.ToLower(cn), compFilter) {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					continue
+				}
+			}
+			if tagFilter != "" && !hasTag(e) {
+				continue
+			}
+			matched++
+			if shown >= limit {
+				continue
+			}
+			shown++
 			name := e.Name
 			if name == "" {
 				name = "(unnamed)"
 			}
 			pos := fmt.Sprintf("%.0f, %.0f", e.Entity.PosX, e.Entity.PosY)
-			var compNames []string
-			for _, cid := range e.ComponentIDs {
-				if n, ok := nameMap[cid]; ok {
-					compNames = append(compNames, n)
-				} else {
-					compNames = append(compNames, fmt.Sprintf("type_%d", cid))
-				}
-			}
 			fmt.Fprintf(&b, "%-8d %-30s %-20s %s\n",
-				e.Entity.EntityId, truncateStr(name, 29), pos, strings.Join(compNames, ", "))
+				e.Entity.EntityId, truncateStr(name, 29), pos, strings.Join(cNames, ", "))
 		}
+		if tagFilter != "" && tagNames == nil {
+			fmt.Fprintf(&b, "\n(tag filter ignored: EntityTagManager unavailable)\n")
+		}
+		fmt.Fprintf(&b, "\n(showing %d of %d matching; %d live entities total; pass name/component/tag/limit to narrow)\n",
+			shown, matched, len(entities))
 		return textResult(b.String()), nil, nil
 	})
 
@@ -529,6 +606,15 @@ func registerRuntimeTools(s *mcp.Server) {
 				gc.ActionsPerRound, gc.DeckCapacity, gc.ShuffleDeckWhenEmpty, gc.ReloadTime)
 		}
 
+		// Spell/action-card entities carry an ItemActionComponent whose
+		// action_id names the spell (e.g. "CHAINSAW", "LIGHT_BULLET_TRIGGER").
+		if em, _ := reader.ReadEntityManagerPtr(); em != nil {
+			if action, ok := reader.ReadItemActionID(em, details.Entity.SlotIndex); ok {
+				fmt.Fprintf(&b, "\n  ItemActionComponent:\n")
+				fmt.Fprintf(&b, "    action_id:  %s\n", action)
+			}
+		}
+
 		if len(details.Children) > 0 {
 			fmt.Fprintf(&b, "\n  Children (%d):\n", len(details.Children))
 			for _, child := range details.Children {
@@ -540,6 +626,79 @@ func registerRuntimeTools(s *mcp.Server) {
 			}
 		}
 
+		return textResult(b.String()), nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "wand_deck",
+		Description: "Summarize a wand's AbilityComponent and list its spells in true deck (cast) order, sorted by inventory_slot. Pass entity_id of a wand entity, or held=true for the player's active/held wand.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in wandDeckInput) (*mcp.CallToolResult, any, error) {
+		reader, _, err := connectRuntime()
+		if err != nil {
+			return toolErr(err)
+		}
+		em, _ := reader.ReadEntityManagerPtr()
+		if em == nil {
+			return toolErr(fmt.Errorf("failed to read EntityManager"))
+		}
+
+		var wand *noita.Entity
+		var wandID int32
+		switch {
+		case in.EntityID != 0:
+			e := findEntityByIDRT(reader, in.EntityID)
+			if e == nil {
+				return toolErr(fmt.Errorf("entity %d not found", in.EntityID))
+			}
+			wand = e.Entity
+			wandID = in.EntityID
+		case in.Held:
+			wand = reader.ReadHeldWandEntity()
+			if wand == nil {
+				return toolErr(fmt.Errorf("could not resolve the player's held wand; pass an explicit entity_id"))
+			}
+			wandID = wand.EntityId
+		default:
+			return toolErr(fmt.Errorf("provide entity_id or set held=true"))
+		}
+
+		deck := reader.ReadWandDeck(em, wand)
+		if deck == nil {
+			return toolErr(fmt.Errorf("entity %d has no AbilityComponent (not a wand)", wandID))
+		}
+
+		a := deck.Ability
+		gc := a.GunConfig
+		var b strings.Builder
+		fmt.Fprintf(&b, "=== Wand %d: %s ===\n", wandID, a.UiName.FormatMsvcString(reader.Ctx))
+		fmt.Fprintf(&b, "  Mana:      %.0f / %.0f (regen %.0f/s)\n", a.Mana, a.ManaMax, a.ManaChargeSpeed*60)
+		fmt.Fprintf(&b, "  Deck cap:  %d   Actions/round: %d   Shuffle: %v   Reload: %d\n",
+			gc.DeckCapacity, gc.ActionsPerRound, gc.ShuffleDeckWhenEmpty, gc.ReloadTime)
+		fmt.Fprintf(&b, "  UseGun:    %v\n", a.UseGunScript)
+		fmt.Fprintf(&b, "\n  Spells (%d, deck order):\n", len(deck.Spells))
+		if len(deck.Spells) == 0 {
+			b.WriteString("    (none)\n")
+		} else {
+			fmt.Fprintf(&b, "    %-3s %-26s %-5s %-9s %s\n", "#", "action_id", "uses", "slot(x,y)", "entity")
+			for i, sp := range deck.Spells {
+				uses := "-"
+				slot := "?"
+				if sp.HasItem {
+					if sp.UsesRemaining < 0 {
+						uses = "inf"
+					} else {
+						uses = strconv.Itoa(int(sp.UsesRemaining))
+					}
+					slot = fmt.Sprintf("%d,%d", sp.SlotX, sp.SlotY)
+				}
+				action := sp.ActionID
+				if action == "" {
+					action = "(none)"
+				}
+				fmt.Fprintf(&b, "    %-3d %-26s %-5s %-9s %d\n",
+					i, truncateStr(action, 25), uses, slot, sp.EntityID)
+			}
+		}
 		return textResult(b.String()), nil, nil
 	})
 

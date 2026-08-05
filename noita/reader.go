@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -134,6 +135,47 @@ type ActiveEffect struct {
 	CustomEffectID string // populated for effect=CUSTOM perks like PROTECTION_RADIOACTIVITY
 	Effect         int32  // GAME_EFFECT enum index
 	Frames         int32  // -1 = forever
+}
+
+// GameEffectNames maps the GAME_EFFECT enum index to its name, transcribed from
+// StatusEffect_EnumToString in noita.exe. Gaps (e.g. 17, 18, 39) are unused
+// enum slots the engine skips. Index 0x5a (CUSTOM) carries its real id in
+// GameEffectComponent.custom_effect_id instead.
+var GameEffectNames = map[int32]string{
+	0: "NONE", 1: "ELECTROCUTION", 2: "FROZEN", 3: "ON_FIRE", 4: "POISON",
+	5: "BERSERK", 6: "CHARM", 7: "POLYMORPH", 8: "POLYMORPH_RANDOM",
+	9: "BLINDNESS", 10: "TELEPATHY", 11: "TELEPORTATION", 12: "REGENERATION",
+	13: "LEVITATION", 14: "MOVEMENT_SLOWER", 15: "FARTS", 16: "DRUNK",
+	19: "BREATH_UNDERWATER", 20: "RADIOACTIVE", 21: "WET", 22: "OILED",
+	23: "BLOODY", 24: "SLIMY", 25: "CRITICAL_HIT_BOOST", 26: "CONFUSION",
+	27: "MELEE_COUNTER", 28: "WORM_ATTRACTOR", 29: "WORM_DETRACTOR",
+	30: "FOOD_POISONING", 31: "FRIEND_THUNDERMAGE", 32: "FRIEND_FIREMAGE",
+	33: "INTERNAL_FIRE", 34: "INTERNAL_ICE", 35: "JARATE", 36: "KNOCKBACK",
+	37: "KNOCKBACK_IMMUNITY", 38: "MOVEMENT_SLOWER_2X", 40: "MOVEMENT_FASTER",
+	41: "STAINS_DROP_FASTER", 42: "SAVING_GRACE", 43: "DAMAGE_MULTIPLIER",
+	44: "HEALING_BLOOD", 45: "RESPAWN", 46: "PROTECTION_FIRE",
+	47: "PROTECTION_RADIOACTIVITY", 48: "PROTECTION_EXPLOSION",
+	49: "PROTECTION_MELEE", 50: "PROTECTION_ELECTRICITY", 51: "TELEPORTITIS",
+	52: "STAINLESS_ARMOUR", 53: "GLOBAL_GORE", 54: "EDIT_WANDS_EVERYWHERE",
+	55: "EXPLODING_CORPSE_SHOTS", 56: "EXPLODING_CORPSE", 57: "EXTRA_MONEY",
+	58: "EXTRA_MONEY_TRICK_KILL", 60: "HOVER_BOOST", 61: "PROJECTILE_HOMING",
+	62: "ABILITY_ACTIONS_MATERIALIZED", 70: "NO_DAMAGE_FLASH",
+	71: "NO_SLIME_SLOWDOWN", 72: "MOVEMENT_FASTER_2X", 73: "NO_WAND_EDITING",
+	74: "LOW_HP_DAMAGE_BOOST", 75: "FASTER_LEVITATION",
+	76: "STUN_PROTECTION_ELECTRICITY", 77: "STUN_PROTECTION_FREEZE",
+	78: "IRON_STOMACH", 80: "PROTECTION_ALL", 81: "INVISIBILITY",
+	82: "REMOVE_FOG_OF_WAR", 83: "MANA_REGENERATION",
+	84: "PROTECTION_DURING_TELEPORT", 85: "PROTECTION_POLYMORPH",
+	86: "PROTECTION_FREEZE", 87: "FROZEN_SPEED_UP", 88: "UNSTABLE_TELEPORTATION",
+	89: "POLYMORPH_UNSTABLE", 90: "CUSTOM", 91: "ALLERGY_RADIOACTIVE",
+	92: "RAINBOW_FARTS", 93: "WEAKNESS", 94: "PROTECTION_FOOD_POISONING",
+	95: "NO_HEAL", 96: "PROTECTION_EDGES", 97: "PROTECTION_PROJECTILE",
+	98: "POLYMORPH_CESSATION", 99: "_LAST",
+}
+
+// EffectName returns the GAME_EFFECT enum name, or "" if the index is unknown.
+func (e ActiveEffect) EffectName() string {
+	return GameEffectNames[e.Effect]
 }
 
 // EntitySummary holds basic info about an entity for list display.
@@ -480,6 +522,243 @@ func (r *Reader) ReadWandSpellNames(em *EntityManager, wand *Entity) []string {
 		out = append(out, s.FormatMsvcString(r.Ctx))
 	}
 	return out
+}
+
+// itemComponentInventorySlotOffset is the byte offset of the vec2i
+// inventory_slot inside ItemComponent (typeId 80). This field is NOT present
+// in noita.hexpat (which only maps ItemComponent through +0x6D) nor in the
+// generated struct, so it is read here at a raw offset.
+//
+// Offset confirmed via Ghidra: Inventory_ItemSortComparator (0x00b4eea0) — the
+// std::sort comparator the engine uses to order inventory/deck item entities —
+// keys on *(ItemComponent+0xDC) (primary) then *(ItemComponent+0xD8)
+// (secondary). Those two adjacent int32s are inventory_slot as a vec2i
+// {x @ +0xD8, y @ +0xDC}; the engine sorts row-major (y then x). Wand spell
+// cards all share slot.y == 0, so the effective deck (cast) order is ascending
+// inventory_slot.x. Re-verify against a live wand if wand_deck order ever looks
+// wrong (only this constant would need changing).
+const itemComponentInventorySlotOffset = 0xD8
+
+// WandSpell is one spell/action card contained in a wand, resolved to its
+// action id, remaining uses, and inventory slot. Slots determine deck (cast)
+// order.
+type WandSpell struct {
+	EntityID      int32
+	ChildPtr      uint32
+	ActionID      string
+	SlotX         int32
+	SlotY         int32
+	UsesRemaining int32 // ItemComponent.uses_remaining; -1 = unlimited
+	HasItem       bool  // false when the card has no ItemComponent (slot unknown)
+}
+
+// WandDeck bundles a wand's AbilityComponent with its spell cards in deck
+// (inventory-slot) order.
+type WandDeck struct {
+	Ability *AbilityComponent
+	Spells  []WandSpell
+}
+
+// ReadWandDeck resolves a wand entity's AbilityComponent and its contained
+// spell cards, returning the spells sorted into true deck (cast) order:
+// ascending inventory_slot, row-major (y then x), matching the engine's
+// Inventory_ItemSortComparator. Spell cards are the wand's child entities that
+// carry an ItemActionComponent (typeId 77). Returns nil if the entity has no
+// AbilityComponent (i.e. it is not a wand / ability item).
+func (r *Reader) ReadWandDeck(em *EntityManager, wand *Entity) *WandDeck {
+	if em == nil || wand == nil {
+		return nil
+	}
+	ability := readComponent[AbilityComponent](r, em, wand.SlotIndex, TypeIDAbilityComponent, ReadAbilityComponent)
+	if ability == nil {
+		return nil
+	}
+	deck := &WandDeck{Ability: ability}
+	for _, cp := range r.readChildEntityPtrs(wand) {
+		if cp == 0 {
+			continue
+		}
+		child, _ := ReadEntity(r.Ctx, uintptr(cp))
+		if child == nil || child.PendingKill >= 1 {
+			continue
+		}
+		// A spell card is a child with an ItemActionComponent (typeId 77).
+		actionPtr := r.findComponentPtr(em, child.SlotIndex, TypeIDItemActionComponent)
+		if actionPtr == 0 {
+			continue
+		}
+		spell := WandSpell{EntityID: child.EntityId, ChildPtr: cp}
+		// action_id MsvcString at ItemActionComponent + 0x48 (after the shared
+		// ComponentHeader).
+		if s, _ := ReadMsvcString(r.Ctx, uintptr(int64(actionPtr)+0x48)); s != nil {
+			spell.ActionID = s.FormatMsvcString(r.Ctx)
+		}
+		// inventory_slot + uses_remaining come from the card's ItemComponent.
+		if itemPtr := r.findComponentPtr(em, child.SlotIndex, TypeIDItemComponent); itemPtr != 0 {
+			spell.HasItem = true
+			if x, err := r.readS32(int64(itemPtr) + itemComponentInventorySlotOffset); err == nil {
+				spell.SlotX = x
+			}
+			if y, err := r.readS32(int64(itemPtr) + itemComponentInventorySlotOffset + 4); err == nil {
+				spell.SlotY = y
+			}
+			if item := readComponent[ItemComponent](r, em, child.SlotIndex, TypeIDItemComponent, ReadItemComponent); item != nil {
+				spell.UsesRemaining = item.UsesRemaining
+			}
+		}
+		deck.Spells = append(deck.Spells, spell)
+	}
+	// Deck (cast) order: ascending inventory_slot, row-major (y then x) to
+	// mirror the engine. Stable so original child order breaks exact ties.
+	sort.SliceStable(deck.Spells, func(i, j int) bool {
+		a, b := deck.Spells[i], deck.Spells[j]
+		if a.SlotY != b.SlotY {
+			return a.SlotY < b.SlotY
+		}
+		return a.SlotX < b.SlotX
+	})
+	return deck
+}
+
+// ReadHeldWandEntity resolves the player's currently-held wand entity, or
+// returns nil if it cannot be determined. The player is DeathMatchApp's first
+// player entity; its Inventory2Component.ActiveItem is the active quick-slot
+// index, and the held wand is the child item whose inventory_slot.x equals that
+// index and which carries an AbilityComponent. Best-effort convenience — the
+// caller should fall back to an explicit entity id when this returns nil.
+func (r *Reader) ReadHeldWandEntity() *Entity {
+	em := r.readEM()
+	if em == nil {
+		return nil
+	}
+	dma, _ := ReadGDeathMatchApp(r.Ctx)
+	if dma == nil || len(dma.PlayerEntities.Elements) == 0 {
+		return nil
+	}
+	pePtr := dma.PlayerEntities.Elements[0]
+	if pePtr == 0 {
+		return nil
+	}
+	player, _ := ReadEntity(r.Ctx, uintptr(pePtr))
+	if player == nil {
+		return nil
+	}
+	inv := readComponent[Inventory2Component](r, em, player.SlotIndex, TypeIDInventory2Component, ReadInventory2Component)
+	if inv == nil {
+		return nil
+	}
+	active := inv.ActiveItem
+	for _, cp := range r.readChildEntityPtrs(player) {
+		if cp == 0 {
+			continue
+		}
+		child, _ := ReadEntity(r.Ctx, uintptr(cp))
+		if child == nil || child.PendingKill >= 1 {
+			continue
+		}
+		if ac := readComponent[AbilityComponent](r, em, child.SlotIndex, TypeIDAbilityComponent, ReadAbilityComponent); ac == nil {
+			continue
+		}
+		itemPtr := r.findComponentPtr(em, child.SlotIndex, TypeIDItemComponent)
+		if itemPtr == 0 {
+			continue
+		}
+		slotX, err := r.readS32(int64(itemPtr) + itemComponentInventorySlotOffset)
+		if err == nil && slotX == active {
+			return child
+		}
+	}
+	return nil
+}
+
+// ReadEntityTagNames walks the global EntityTagManager and returns a
+// bit-index -> tag-name lookup. The manager holds a std::map at
+// g_entityTagManager + 0xc (StdMapHeader {head@0, size@4}); each node's key is
+// the tag name (MsvcString @ node+0x10) and its value is the tag's bit index
+// (u16 @ node+0x28), matching TagManager_LookupTagBitmask (0x008a0df0).
+// Returns nil if the manager is unavailable. The returned indices align with
+// Entity.TagBitset bit numbering.
+func (r *Reader) ReadEntityTagNames() map[int]string {
+	tmPtr, err := ReadGEntityTagManager(r.Ctx)
+	if err != nil || tmPtr == 0 {
+		return nil
+	}
+	// std::map object at tmPtr+0xc: head sentinel pointer at +0, size at +4.
+	var hdr [8]byte
+	if _, err := r.Ctx.ReadAt(hdr[:], int64(tmPtr)+0xc); err != nil {
+		return nil
+	}
+	headPtr := binary.LittleEndian.Uint32(hdr[0:4])
+	size := binary.LittleEndian.Uint32(hdr[4:8])
+	if headPtr == 0 || size == 0 || size > 65536 {
+		return nil
+	}
+	// root = head._Parent.
+	var head [16]byte
+	if _, err := r.Ctx.ReadAt(head[:], int64(headPtr)); err != nil {
+		return nil
+	}
+	root := binary.LittleEndian.Uint32(head[4:8])
+	if root == 0 || root == headPtr {
+		return nil
+	}
+	out := make(map[int]string, size)
+	stack := []uint32{root}
+	limit := int(size)*2 + 16
+	if limit > 200000 {
+		limit = 200000
+	}
+	visited := 0
+	for len(stack) > 0 && visited < limit {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		visited++
+		if node == 0 || node == headPtr {
+			continue
+		}
+		var raw [0x2a]byte // through the u16 value at +0x28
+		if _, err := r.Ctx.ReadAt(raw[:], int64(node)); err != nil {
+			continue
+		}
+		if raw[13] != 0 { // _Isnil
+			continue
+		}
+		left := binary.LittleEndian.Uint32(raw[0:4])
+		right := binary.LittleEndian.Uint32(raw[8:12])
+		if left != 0 && left != headPtr {
+			stack = append(stack, left)
+		}
+		if right != 0 && right != headPtr {
+			stack = append(stack, right)
+		}
+		key, _ := ReadMsvcString(r.Ctx, uintptr(int64(node)+0x10))
+		if key == nil {
+			continue
+		}
+		bit := int(binary.LittleEndian.Uint16(raw[0x28:0x2a]))
+		out[bit] = key.FormatMsvcString(r.Ctx)
+	}
+	return out
+}
+
+// ReadItemActionID returns the action_id string of an entity's
+// ItemActionComponent (typeId 77), or ("", false) if the entity has no such
+// component. action_id is an MsvcString at ItemActionComponent + 0x48 (after
+// the shared ComponentHeader); the generated struct does not model this
+// component, so the offset is used directly.
+func (r *Reader) ReadItemActionID(em *EntityManager, slotIndex int32) (string, bool) {
+	if em == nil {
+		return "", false
+	}
+	ptr := r.findComponentPtr(em, slotIndex, TypeIDItemActionComponent)
+	if ptr == 0 {
+		return "", false
+	}
+	s, _ := ReadMsvcString(r.Ctx, uintptr(int64(ptr)+0x48))
+	if s == nil {
+		return "", false
+	}
+	return s.FormatMsvcString(r.Ctx), true
 }
 
 func (r *Reader) ReadFungalShifts(vec *StdVectorHeader) []FungalShift {
